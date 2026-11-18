@@ -1,6 +1,8 @@
 """多智能体旅行规划系统"""
 
 import json
+import sys
+from pathlib import Path
 from typing import Dict, Any, List
 from hello_agents import SimpleAgent
 from hello_agents.tools import MCPTool
@@ -168,10 +170,12 @@ class MultiAgentTripPlanner:
             self.amap_tool = MCPTool(
                 name="amap",
                 description="高德地图服务",
-                server_command=["uvx", "amap-mcp-server"],
+                server_command=[str(Path(sys.executable).parent / "amap-mcp-server")],
                 env={"AMAP_MAPS_API_KEY": settings.amap_api_key},
                 auto_expand=True
             )
+            if not self.amap_tool.get_expanded_tools():
+                raise RuntimeError("高德 MCP 服务未发现可用工具，请检查依赖和服务日志")
             self.amap_tool.expandable=True
 
             # 创建景点搜索Agent
@@ -231,6 +235,7 @@ class MultiAgentTripPlanner:
             旅行计划
         """
         try:
+            model_options = {"extra_body": {"enable_thinking": False}} if "qwen" in (self.llm.model or "").lower() else {}
             print(f"\n{'='*60}")
             print(f"🚀 开始多智能体协作规划旅行...")
             print(f"目的地: {request.city}")
@@ -242,25 +247,25 @@ class MultiAgentTripPlanner:
             # 步骤1: 景点搜索Agent搜索景点
             print("📍 步骤1: 搜索景点...")
             attraction_query = self._build_attraction_query(request)
-            attraction_response = self.attraction_agent.run(attraction_query)
+            attraction_response = self.attraction_agent.run(attraction_query, **model_options)
             print(f"景点搜索结果: {attraction_response[:200]}...\n")
 
             # 步骤2: 天气查询Agent查询天气
             print("🌤️  步骤2: 查询天气...")
             weather_query = f"请查询{request.city}的天气信息"
-            weather_response = self.weather_agent.run(weather_query)
+            weather_response = self.weather_agent.run(weather_query, **model_options)
             print(f"天气查询结果: {weather_response[:200]}...\n")
 
             # 步骤3: 酒店推荐Agent搜索酒店
             print("🏨 步骤3: 搜索酒店...")
             hotel_query = f"请搜索{request.city}的{request.accommodation}酒店"
-            hotel_response = self.hotel_agent.run(hotel_query)
+            hotel_response = self.hotel_agent.run(hotel_query, **model_options)
             print(f"酒店搜索结果: {hotel_response[:200]}...\n")
 
             # 步骤4: 行程规划Agent整合信息生成计划
             print("📋 步骤4: 生成行程计划...")
             planner_query = self._build_planner_query(request, attraction_response, weather_response, hotel_response)
-            planner_response = self.planner_agent.run(planner_query)
+            planner_response = self.planner_agent.run(planner_query, **model_options)
             print(f"行程规划结果: {planner_response[:300]}...\n")
 
             # 解析最终计划
@@ -276,7 +281,7 @@ class MultiAgentTripPlanner:
             print(f"❌ 生成旅行计划失败: {str(e)}")
             import traceback
             traceback.print_exc()
-            return self._create_fallback_plan(request)
+            raise
     
     def _build_attraction_query(self, request: TripRequest) -> str:
         """构建景点搜索查询 - 直接包含工具调用"""
@@ -365,8 +370,7 @@ class MultiAgentTripPlanner:
             
         except Exception as e:
             print(f"⚠️  解析响应失败: {str(e)}")
-            print(f"   将使用备用方案生成计划")
-            return self._create_fallback_plan(request)
+            raise ValueError(f"模型返回的行程格式无效: {e}") from e
     
     def _create_fallback_plan(self, request: TripRequest) -> TripPlan:
         """创建备用计划(当Agent失败时)"""

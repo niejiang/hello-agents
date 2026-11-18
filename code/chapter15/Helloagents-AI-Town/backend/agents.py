@@ -154,14 +154,19 @@ class NPCAgentManager:
         )
 
         # 创建记忆管理器
-        memory_manager = MemoryManager(
-            config=memory_config,
-            user_id=npc_name,  # 使用NPC名字作为user_id
-            enable_working=True,  # 启用工作记忆 (短期)
-            enable_episodic=True,  # 启用情景记忆 (长期)
-            enable_semantic=False,  # 不需要语义记忆
-            enable_perceptual=False  # 不需要感知记忆
-        )
+        try:
+            memory_manager = MemoryManager(
+                config=memory_config, user_id=npc_name,
+                enable_working=True, enable_episodic=True,
+                enable_semantic=False, enable_perceptual=False,
+            )
+        except (ImportError, RuntimeError, ConnectionError) as exc:
+            print(f"⚠️ {npc_name}长期记忆不可用，暂时使用会话短期记忆: {exc}")
+            memory_manager = MemoryManager(
+                config=memory_config, user_id=npc_name,
+                enable_working=True, enable_episodic=False,
+                enable_semantic=False, enable_perceptual=False,
+            )
 
         print(f"  💾 {npc_name}的记忆系统已初始化 (存储路径: {memory_dir})")
 
@@ -296,6 +301,7 @@ class NPCAgentManager:
         memory_manager.add_memory(
             content=f"玩家说: {player_message}",
             memory_type="working",  # 先存入工作记忆
+            auto_classify=False,
             importance=0.5,  # 中等重要性
             metadata={
                 "speaker": "player",
@@ -316,6 +322,7 @@ class NPCAgentManager:
         memory_manager.add_memory(
             content=f"我说: {npc_response}",
             memory_type="working",  # 先存入工作记忆
+            auto_classify=False,
             importance=0.6,  # 稍高重要性
             metadata={
                 "speaker": npc_name,

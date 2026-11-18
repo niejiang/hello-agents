@@ -1,5 +1,9 @@
 """FastAPI主应用"""
 
+from ..file_logging import configure_file_logging
+
+configure_file_logging()
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from ..config import get_settings, validate_config, print_config

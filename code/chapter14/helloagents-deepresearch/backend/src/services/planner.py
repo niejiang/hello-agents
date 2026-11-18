@@ -42,6 +42,17 @@ class PlanningService:
         logger.info("Planner raw output (truncated): %s", response[:500])
 
         tasks_payload = self._extract_tasks(response)
+        if not tasks_payload and response.strip():
+            # After note-tool calls some models return the plan as prose even
+            # though JSON was requested. Recover the existing plan once.
+            try:
+                converted = self._agent.llm.invoke([
+                    {"role": "system", "content": "将给定的研究任务转换成 JSON。只输出 JSON 对象，包含 tasks 数组，每项包含 title、intent、query；不要调用工具。"},
+                    {"role": "user", "content": response},
+                ])
+                tasks_payload = self._extract_tasks(converted or "")
+            except Exception as exc:
+                logger.warning("Could not convert research plan to JSON: %s", exc)
         todo_items: List[TodoItem] = []
 
         for idx, item in enumerate(tasks_payload, start=1):

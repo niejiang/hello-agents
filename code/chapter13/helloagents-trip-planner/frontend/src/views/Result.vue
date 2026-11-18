@@ -316,6 +316,7 @@ import AMapLoader from '@amap/amap-jsapi-loader'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
 import type { TripPlan } from '@/types'
+import { getAttractionPhoto } from '@/services/api'
 
 const router = useRouter()
 const tripPlan = ref<TripPlan | null>(null)
@@ -428,23 +429,15 @@ const getMealLabel = (type: string): string => {
 const loadAttractionPhotos = async () => {
   if (!tripPlan.value) return
 
-  const promises: Promise<void>[] = []
-
-  tripPlan.value.days.forEach(day => {
-    day.attractions.forEach(attraction => {
-      const promise = fetch(`http://localhost:8000/api/poi/photo?name=${encodeURIComponent(attraction.name)}`)
-        .then(res => res.json())
-        .then(data => {
-          if (data.success && data.data.photo_url) {
-            attractionPhotos.value[attraction.name] = data.data.photo_url
-          }
-        })
-        .catch(err => {
-          console.error(`获取${attraction.name}图片失败:`, err)
-        })
-
-      promises.push(promise)
-    })
+  const city = tripPlan.value.city
+  const names = new Set(tripPlan.value.days.flatMap(day => day.attractions.map(attraction => attraction.name)))
+  const promises = Array.from(names, async name => {
+    try {
+      const photoUrl = await getAttractionPhoto(name, city)
+      if (photoUrl) attractionPhotos.value[name] = photoUrl
+    } catch (err) {
+      console.error(`获取${name}图片失败:`, err)
+    }
   })
 
   await Promise.all(promises)
@@ -789,6 +782,9 @@ const exportAsPDF = async () => {
 // 初始化地图
 const initMap = async () => {
   try {
+    ;(window as any)._AMapSecurityConfig = {
+      securityJsCode: import.meta.env.VITE_AMAP_SECURITY_JS_CODE
+    }
     const AMap = await AMapLoader.load({
       key: import.meta.env.VITE_AMAP_WEB_JS_KEY,  // 高德地图Web端(JS API) Key
       version: '2.0',

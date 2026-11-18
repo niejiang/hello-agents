@@ -22,7 +22,14 @@ def create_openai_model_client():
     return OpenAIChatCompletionClient(
         model=os.getenv("LLM_MODEL_ID", "gpt-4o"),
         api_key=os.getenv("LLM_API_KEY"),
-        base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1")
+        base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"),
+        model_info = {
+            "vision": True,  # 支持图片输入
+            "function_calling": True,  # 支持工具调用
+            "json_output": True,  # 支持 JSON 输出
+            "family": "unknown",  # 使用通用模型处理方式
+            "structured_output": False,  # 不启用严格结构化输出
+        }
     )
 
 def create_product_manager(model_client):

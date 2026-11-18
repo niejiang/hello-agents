@@ -1,0 +1,398 @@
+{
+  "notes": [
+    {
+      "id": "note_20261115_162029_0",
+      "title": "任务 1: 核心概念与机制",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_1"
+      ],
+      "created_at": "2026-11-15T16:20:29.349245"
+    },
+    {
+      "id": "note_20261115_162029_1",
+      "title": "任务 2: 基础语法与模式",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_2"
+      ],
+      "created_at": "2026-11-15T16:20:29.350623"
+    },
+    {
+      "id": "note_20261115_162029_2",
+      "title": "任务 3: 应用场景与对比",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_3"
+      ],
+      "created_at": "2026-11-15T16:20:29.351446"
+    },
+    {
+      "id": "note_20261115_162029_3",
+      "title": "任务 4: 主流生态与框架",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_4"
+      ],
+      "created_at": "2026-11-15T16:20:29.351991"
+    },
+    {
+      "id": "note_20261115_162254_4",
+      "title": "任务 1: 核心概念与机制",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_1"
+      ],
+      "created_at": "2026-11-15T16:22:54.596864"
+    },
+    {
+      "id": "note_20261115_162254_5",
+      "title": "任务 2: 基础语法与实现",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_2"
+      ],
+      "created_at": "2026-11-15T16:22:54.598058"
+    },
+    {
+      "id": "note_20261115_162254_6",
+      "title": "任务 3: 场景与并发对比",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_3"
+      ],
+      "created_at": "2026-11-15T16:22:54.598546"
+    },
+    {
+      "id": "note_20261115_162254_7",
+      "title": "任务 4: 高级特性与实践",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_4"
+      ],
+      "created_at": "2026-11-15T16:22:54.598962"
+    },
+    {
+      "id": "note_20261115_162355_8",
+      "title": "任务 1: 基础背景梳理",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_1"
+      ],
+      "created_at": "2026-11-15T16:23:55.247704"
+    },
+    {
+      "id": "note_20261115_162611_9",
+      "title": "研究报告：Python asyncio 的基本概念和用途",
+      "type": "conclusion",
+      "tags": [
+        "deep_research",
+        "report"
+      ],
+      "created_at": "2026-11-15T16:26:11.995506"
+    },
+    {
+      "id": "note_20261115_162933_10",
+      "title": "任务 1: 核心概念与机制",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_1"
+      ],
+      "created_at": "2026-11-15T16:29:33.709304"
+    },
+    {
+      "id": "note_20261115_162933_11",
+      "title": "任务 2: 关键语法与API",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_2"
+      ],
+      "created_at": "2026-11-15T16:29:33.710508"
+    },
+    {
+      "id": "note_20261115_162933_12",
+      "title": "任务 3: 应用场景与对比",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_3"
+      ],
+      "created_at": "2026-11-15T16:29:33.711143"
+    },
+    {
+      "id": "note_20261115_162933_13",
+      "title": "任务 4: 最佳实践与避坑",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_4"
+      ],
+      "created_at": "2026-11-15T16:29:33.711921"
+    },
+    {
+      "id": "note_20261115_163739_14",
+      "title": "任务 1: 核心概念解析",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_1"
+      ],
+      "created_at": "2026-11-15T16:37:39.570306"
+    },
+    {
+      "id": "note_20261115_163739_15",
+      "title": "任务 2: 并发机制对比",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_2"
+      ],
+      "created_at": "2026-11-15T16:37:39.571465"
+    },
+    {
+      "id": "note_20261115_163739_16",
+      "title": "任务 3: 典型应用场景",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_3"
+      ],
+      "created_at": "2026-11-15T16:37:39.571965"
+    },
+    {
+      "id": "note_20261115_163739_17",
+      "title": "任务 4: 基础代码实践",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_4"
+      ],
+      "created_at": "2026-11-15T16:37:39.572441"
+    },
+    {
+      "id": "note_20261115_163904_18",
+      "title": "研究报告：Python asyncio 的基本概念和用途",
+      "type": "conclusion",
+      "tags": [
+        "deep_research",
+        "report"
+      ],
+      "created_at": "2026-11-15T16:39:04.035452"
+    },
+    {
+      "id": "note_20261115_164205_19",
+      "title": "任务 1: 核心模型突破",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_1"
+      ],
+      "created_at": "2026-11-15T16:42:05.306741"
+    },
+    {
+      "id": "note_20261115_164205_20",
+      "title": "任务 2: 硬件与算力进展",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_2"
+      ],
+      "created_at": "2026-11-15T16:42:05.307558"
+    },
+    {
+      "id": "note_20261115_164205_21",
+      "title": "任务 3: 重大应用落地",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_3"
+      ],
+      "created_at": "2026-11-15T16:42:05.308065"
+    },
+    {
+      "id": "note_20261115_164205_22",
+      "title": "任务 4: 政策与伦理动态",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_4"
+      ],
+      "created_at": "2026-11-15T16:42:05.308516"
+    },
+    {
+      "id": "note_20261115_164326_23",
+      "title": "研究报告：今个月有关AI的突破",
+      "type": "conclusion",
+      "tags": [
+        "deep_research",
+        "report"
+      ],
+      "created_at": "2026-11-15T16:43:26.899441"
+    },
+    {
+      "id": "note_20261115_185655_24",
+      "title": "任务 1: 行业渗透率调研",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_1"
+      ],
+      "created_at": "2026-11-15T18:56:55.211752"
+    },
+    {
+      "id": "note_20261115_185655_25",
+      "title": "任务 2: 商业价值评估",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_2"
+      ],
+      "created_at": "2026-11-15T18:56:55.218279"
+    },
+    {
+      "id": "note_20261115_185655_26",
+      "title": "任务 3: 用户满意度分析",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_3"
+      ],
+      "created_at": "2026-11-15T18:56:55.221965"
+    },
+    {
+      "id": "note_20261115_185655_27",
+      "title": "任务 4: 技术成熟度对比",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_4"
+      ],
+      "created_at": "2026-11-15T18:56:55.225503"
+    },
+    {
+      "id": "note_20261115_185818_28",
+      "title": "研究报告：agent落地最受欢迎的行业",
+      "type": "conclusion",
+      "tags": [
+        "deep_research",
+        "report"
+      ],
+      "created_at": "2026-11-15T18:58:18.944233"
+    },
+    {
+      "id": "note_20261117_221105_29",
+      "title": "任务 1: 定义与核心概念",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_1"
+      ],
+      "created_at": "2026-11-17T22:11:05.893033"
+    },
+    {
+      "id": "note_20261117_221105_30",
+      "title": "任务 2: 主要类型与场景",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_2"
+      ],
+      "created_at": "2026-11-17T22:11:05.900989"
+    },
+    {
+      "id": "note_20261117_221105_31",
+      "title": "任务 3: 流程与最佳实践",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_3"
+      ],
+      "created_at": "2026-11-17T22:11:05.905079"
+    },
+    {
+      "id": "note_20261117_221105_32",
+      "title": "任务 4: 知名案例与社区",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_4"
+      ],
+      "created_at": "2026-11-17T22:11:05.908937"
+    },
+    {
+      "id": "note_20261117_221419_33",
+      "title": "研究报告：spec会议是什么",
+      "type": "conclusion",
+      "tags": [
+        "deep_research",
+        "report"
+      ],
+      "created_at": "2026-11-17T22:14:19.538768"
+    },
+    {
+      "id": "note_20261117_224514_34",
+      "title": "任务 1: 技术演进预测",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_1"
+      ],
+      "created_at": "2026-11-17T22:45:14.060704"
+    },
+    {
+      "id": "note_20261117_224514_35",
+      "title": "任务 2: 产业应用重构",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_2"
+      ],
+      "created_at": "2026-11-17T22:45:14.067952"
+    },
+    {
+      "id": "note_20261117_224514_36",
+      "title": "任务 3: 社会伦理治理",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_3"
+      ],
+      "created_at": "2026-11-17T22:45:14.072660"
+    },
+    {
+      "id": "note_20261117_224514_37",
+      "title": "任务 4: 基础设施生态",
+      "type": "task_state",
+      "tags": [
+        "deep_research",
+        "task_4"
+      ],
+      "created_at": "2026-11-17T22:45:14.077252"
+    },
+    {
+      "id": "note_20261117_225947_38",
+      "title": "研究报告：2030年ai会发展成什么样",
+      "type": "conclusion",
+      "tags": [
+        "deep_research",
+        "report"
+      ],
+      "created_at": "2026-11-17T22:59:47.215707"
+    }
+  ],
+  "metadata": {
+    "created_at": "2026-11-15T16:19:40.682201",
+    "total_notes": 39
+  }
+}

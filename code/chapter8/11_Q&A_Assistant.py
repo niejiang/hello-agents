@@ -17,6 +17,7 @@ import time
 import json
 from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
+from urllib.request import getproxies
 from hello_agents.tools import MemoryTool, RAGTool
 import gradio as gr
 
@@ -275,7 +276,10 @@ def create_gradio_ui():
     def chat(message: str, history: List) -> Tuple[str, List]:
         """聊天功能"""
         if assistant_state["assistant"] is None:
-            return "", history + [[message, "❌ 请先初始化助手并加载文档"]]
+            return "", history + [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": "❌ 请先初始化助手并加载文档"},
+            ]
 
         if not message.strip():
             return "", history
@@ -290,7 +294,10 @@ def create_gradio_ui():
             response = assistant_state["assistant"].ask(message)
             response = f"💡 **回答**\n\n{response}"
 
-        history.append([message, response])
+        history.extend([
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": response},
+        ])
         return "", history
 
     def add_note_ui(note_content: str, concept: str) -> str:
@@ -335,7 +342,7 @@ def create_gradio_ui():
         return result
 
     # 创建Gradio界面
-    with gr.Blocks(title="智能文档问答助手", theme=gr.themes.Soft()) as demo:
+    with gr.Blocks(title="智能文档问答助手") as demo:
         gr.Markdown("""
         # 📚 智能文档问答助手
 
@@ -373,8 +380,7 @@ def create_gradio_ui():
             gr.Markdown("### 向文档提问或回顾学习历程")
             chatbot = gr.Chatbot(
                 label="对话历史",
-                height=400,
-                bubble_full_width=False
+                height=400
             )
             with gr.Row():
                 msg_input = gr.Textbox(
@@ -429,6 +435,24 @@ def create_gradio_ui():
 
 def main():
     """主函数 - 启动Gradio Web UI"""
+    # macOS 设置 NO_PROXY 后可能不再读取系统代理，先保留当前有效代理。
+    proxies = getproxies()
+    for scheme in ("http", "https", "all"):
+        if proxies.get(scheme):
+            os.environ.setdefault(f"{scheme}_proxy", proxies[scheme])
+
+    # Gradio 启动时会访问本机接口；合并已有规则，让本机请求绕过代理。
+    bypass_hosts = [
+        host.strip()
+        for name in ("NO_PROXY", "no_proxy")
+        for host in os.environ.get(name, "").split(",")
+        if host.strip()
+    ]
+    bypass_hosts.extend(["localhost", "127.0.0.1", "::1"])
+    bypass = ",".join(dict.fromkeys(bypass_hosts))
+    os.environ["NO_PROXY"] = bypass
+    os.environ["no_proxy"] = bypass
+
     print("\n" + "="*60)
     print("智能文档问答助手")
     print("="*60)
@@ -439,7 +463,8 @@ def main():
         server_name="0.0.0.0",
         server_port=7860,
         share=False,
-        show_error=True
+        show_error=True,
+        theme=gr.themes.Soft()
     )
 
 

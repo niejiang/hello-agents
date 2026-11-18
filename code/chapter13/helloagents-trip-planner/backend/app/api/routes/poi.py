@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from ...services.amap_service import get_amap_service
-from ...services.unsplash_service import get_unsplash_service
+from ...services.amap_photo_service import find_poi_photo
 
 router = APIRouter(prefix="/poi", tags=["POI"])
 
@@ -89,9 +89,9 @@ async def search_poi(keywords: str, city: str = "北京"):
 @router.get(
     "/photo",
     summary="获取景点图片",
-    description="根据景点名称从Unsplash获取图片"
+    description="按城市和景点名称查询高德 POI 图片"
 )
-async def get_attraction_photo(name: str):
+def get_attraction_photo(name: str, city: str = ""):
     """
     获取景点图片
 
@@ -102,21 +102,15 @@ async def get_attraction_photo(name: str):
         图片URL
     """
     try:
-        unsplash_service = get_unsplash_service()
-
-        # 搜索景点图片
-        photo_url = unsplash_service.get_photo_url(f"{name} China landmark")
-
-        if not photo_url:
-            # 如果没找到,尝试只用景点名称搜索
-            photo_url = unsplash_service.get_photo_url(name)
+        photo_url = find_poi_photo(name, city)
 
         return {
             "success": True,
             "message": "获取图片成功",
             "data": {
                 "name": name,
-                "photo_url": photo_url
+                "photo_url": photo_url,
+                "source": "amap" if photo_url else None
             }
         }
 

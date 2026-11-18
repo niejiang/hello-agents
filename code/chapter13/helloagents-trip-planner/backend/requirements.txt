@@ -4,7 +4,7 @@ hello-agents[protocols]>=0.2.4,<=0.2.9
 # FastAPI和相关依赖
 fastapi>=0.115.0
 uvicorn[standard]>=0.32.0
-pydantic>=2.0.0
+pydantic>=2.11.7,<2.12
 pydantic-settings>=2.0.0
 
 # HTTP客户端
@@ -21,7 +21,9 @@ python-multipart>=0.0.9
 loguru>=0.7.0
 
 # MCP相关
-fastmcp>=2.0.0
+fastmcp==2.12.5
+mcp==1.16.0
+amap-mcp-server==0.1.6
 uv>=0.8.0
 
 # 其他工具

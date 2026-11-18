@@ -5,7 +5,7 @@ const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000
 
 const apiClient = axios.create({
   baseURL: API_BASE_URL,
-  timeout: 120000, // 2分钟超时
+  timeout: 600000, // 多智能体请求允许更长的生成时间
   headers: {
     'Content-Type': 'application/json'
   }
@@ -59,6 +59,11 @@ export async function healthCheck(): Promise<any> {
     console.error('健康检查失败:', error)
     throw new Error(error.message || '健康检查失败')
   }
+}
+
+export async function getAttractionPhoto(name: string, city: string): Promise<string | null> {
+  const response = await apiClient.get('/api/poi/photo', { params: { name, city }, timeout: 15000 })
+  return response.data?.data?.photo_url || null
 }
 
 export default apiClient

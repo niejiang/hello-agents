@@ -59,6 +59,9 @@ def get_weather(city: str) -> str:
 
 
 import os
+from pathlib import Path
+
+from dotenv import load_dotenv
 from tavily import TavilyClient
 
 def get_attraction(city: str, weather: str) -> str:
@@ -66,9 +69,8 @@ def get_attraction(city: str, weather: str) -> str:
     根据城市和天气，使用Tavily Search API搜索并返回优化后的景点推荐。
     """
 
-    # 从环境变量或主程序配置中获取API密钥
-    api_key = os.environ.get("TAVILY_API_KEY") # 推荐方式
-    # 或者，我们可以在主循环中传入，如此处代码所示
+    # 启动时会将同目录 .env 中的配置加载到环境变量
+    api_key = os.environ.get("TAVILY_API_KEY")
 
     if not api_key:
         return "错误：未配置TAVILY_API_KEY。"
@@ -141,11 +143,19 @@ class OpenAICompatibleClient:
 import re
 
 # --- 1. 配置LLM客户端 ---
-# 请根据您使用的服务，将这里替换成对应的凭证和地址
-API_KEY = "YOUR_API_KEY"
-BASE_URL = "YOUR_BASE_URL"
-MODEL_ID = "YOUR_MODEL_ID"
-os.environ['TAVILY_API_KEY'] = "YOUR_TAVILY_API_KEY"
+# 按脚本位置定位 .env，避免终端或 IDE 工作目录不同导致找不到配置。
+env_path = Path(__file__).resolve().parent / ".env"
+# 已有的终端或 IDE 环境变量优先，.env 只补充尚未设置的变量。
+load_dotenv(env_path, override=False)
+
+required_config = ("MOONSHOT_API_KEY", "MOONSHOT_BASE_URL", "MOONSHOT_MODEL", "TAVILY_API_KEY")
+missing_config = [name for name in required_config if not os.environ.get(name, "").strip()]
+if missing_config:
+    raise RuntimeError(f"请在 {env_path} 中填写配置，或设置同名环境变量：{', '.join(missing_config)}")
+
+API_KEY = os.environ["MOONSHOT_API_KEY"]
+BASE_URL = os.environ["MOONSHOT_BASE_URL"]
+MODEL_ID = os.environ["MOONSHOT_MODEL"]
 
 llm = OpenAICompatibleClient(
     model=MODEL_ID,
@@ -154,7 +164,7 @@ llm = OpenAICompatibleClient(
 )
 
 # --- 2. 初始化 ---
-user_prompt = "你好，请帮我查询一下今天北京的天气，然后根据天气推荐一个合适的旅游景点。"
+user_prompt = "你好，请帮我查询一下今天纽约和上海的天气，然后根据天气各推荐三个个合适的旅游景点。并表述原因"
 prompt_history = [f"用户请求: {user_prompt}"]
 
 print(f"用户输入: {user_prompt}\n" + "="*40)

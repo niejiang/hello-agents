@@ -21,6 +21,7 @@ from prompts import (
 )
 from models import SummaryState, SummaryStateOutput, TodoItem
 from services.planner import PlanningService
+from services.llm import CompatibleHelloAgentsLLM
 from services.reporter import ReportingService
 from services.search import dispatch_search, prepare_research_context
 from services.summarizer import SummarizationService
@@ -104,7 +105,7 @@ class DeepResearchAgent:
             if self.config.llm_api_key:
                 llm_kwargs["api_key"] = self.config.llm_api_key
 
-        return HelloAgentsLLM(**llm_kwargs)
+        return CompatibleHelloAgentsLLM(**llm_kwargs)
 
     def _create_tool_aware_agent(self, *, name: str, system_prompt: str) -> ToolAwareSimpleAgent:
         """Instantiate a ToolAwareSimpleAgent sharing tool registry and tracker."""

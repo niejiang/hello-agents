@@ -41,9 +41,26 @@ def dispatch_search(
                 "loop_count": loop_count,
             }
         )
-    except Exception as exc:  # pragma: no cover - defensive logging
-        logger.exception("Search backend %s failed: %s", search_api, exc)
-        raise
+    except Exception as exc:
+        if search_api != "duckduckgo":
+            logger.exception("Search backend %s failed: %s", search_api, exc)
+            raise
+
+        # Some ddgs versions no longer provide the hard-coded duckduckgo
+        # backend used by HelloAgents. Let ddgs choose an available engine.
+        from ddgs import DDGS
+
+        notice = "DuckDuckGo 搜索不可用，已切换到自动选择搜索引擎（仅使用搜索摘要）"
+        logger.warning("%s: %s", notice, exc)
+        entries = DDGS(timeout=10).text(query, max_results=5, backend="auto")
+        results = [
+            {"title": item.get("title") or item.get("href", ""),
+             "url": item.get("href") or item.get("url", ""),
+             "content": item.get("body") or item.get("content", "")}
+            for item in entries
+            if item.get("href") or item.get("url")
+        ]
+        raw_response = {"results": results, "backend": "ddgs-auto", "notices": [notice]}
 
     if isinstance(raw_response, str):
         notices = [raw_response]
