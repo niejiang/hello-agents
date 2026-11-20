@@ -5,6 +5,7 @@ import {
   type ChatEvent, type Conversation, type PermissionDecision, type ProjectProfile, type SessionProject,
   type StoredMessage,
 } from './api'
+import DiagramViewer from './DiagramViewer.vue'
 import { renderDiagrams, toggleDiagram } from './diagram'
 import { projectHue, renderMarkdown } from './markdown'
 
@@ -50,6 +51,8 @@ const confirmingDelete = ref('')
 const renaming = ref('')
 const renameText = ref('')
 const loadingConversation = ref(false)
+// 全屏查看的流程图 SVG；为空时不显示查看器。
+const viewerSvg = ref('')
 const sidebarError = ref('')
 const sidebarOpen = ref(false)
 const input = ref('')
@@ -513,8 +516,17 @@ async function copyText(button: HTMLElement, text: string) {
 }
 
 function onConversationClick(event: MouseEvent) {
-  const toggle = (event.target as HTMLElement).closest<HTMLElement>('.diagram-toggle')
+  const target = event.target as HTMLElement
+  const toggle = target.closest<HTMLElement>('.diagram-toggle')
   if (toggle) { toggleDiagram(toggle); return }
+  // 点“放大”或直接点图，全屏查看。
+  const zoom = target.closest<HTMLElement>('.diagram-zoom, .diagram-view')
+  if (zoom) {
+    const block = zoom.closest<HTMLElement>('.diagram-block')
+    const view = block?.querySelector('.diagram-view')
+    if (block?.dataset.diagram === 'done' && view && !block.classList.contains('show-source')) viewerSvg.value = view.innerHTML
+    return
+  }
   const button = (event.target as HTMLElement).closest<HTMLElement>('.copy-code')
   if (!button) return
   copyText(button, button.closest('.code-block')?.querySelector('code')?.textContent ?? '')
@@ -605,6 +617,7 @@ onBeforeUnmount(() => { window.clearInterval(ticker); window.clearTimeout(stopTi
       <p class="sidebar-foot">已授权项目中被读取的代码片段会发送给配置的模型服务。对话保存在本机 data/chat.db。</p>
     </aside>
     <div v-if="sidebarOpen" class="scrim only-mobile" @click="sidebarOpen = false"></div>
+    <DiagramViewer v-if="viewerSvg" :svg="viewerSvg" @close="viewerSvg = ''" />
 
     <main class="main">
       <header class="topbar">

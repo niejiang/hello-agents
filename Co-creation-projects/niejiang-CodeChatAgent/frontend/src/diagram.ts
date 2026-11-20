@@ -61,8 +61,12 @@ export async function renderDiagrams(root: ParentNode | null): Promise<void> {
       if (!(await mermaid.parse(source, { suppressErrors: true }))) throw new Error('syntax')
       const { svg } = await mermaid.render(id, source)
       if (!block.isConnected) continue
-      block.querySelector('.diagram-view')!.innerHTML = svg
+      const view = block.querySelector<HTMLElement>('.diagram-view')!
+      view.innerHTML = svg
       block.dataset.diagram = 'done'
+      // 图被缩小到原始宽度的 70% 以下时提示可以放大查看。
+      const width = view.querySelector('svg')?.viewBox.baseVal?.width ?? 0
+      block.classList.toggle('is-shrunk', width > 0 && view.clientWidth / width < 0.7)
     } catch {
       // 渲染失败时 Mermaid 可能在页面上留下临时元素，一并清理。
       document.getElementById(id)?.remove()
