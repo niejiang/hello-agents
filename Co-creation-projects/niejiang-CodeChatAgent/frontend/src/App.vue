@@ -1,42 +1,48 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref } from 'vue'
-import { postEmpty, postJson, streamChat, type ChatEvent } from './api'
-import { renderMarkdown } from './markdown'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import {
+  HttpError, deleteEmpty, getJson, postEmpty, postJson, streamChat,
+  type ChatEvent, type ProjectProfile, type SessionProject,
+} from './api'
+import { projectHue, renderMarkdown } from './markdown'
 
 type ToolCall = {
   id: string; name: string; arguments: unknown
   status: 'running' | 'ok' | 'error'; summary?: string; lines?: number; truncated?: boolean
+  // open_project 成功后由 project_opened 事件补充的项目信息。
+  opened?: { name: string; stack: string[]; path: string }
 }
 type Part =
   | { kind: 'text'; text: string; html: string }
   | { kind: 'tools'; calls: ToolCall[] }
   | { kind: 'notice'; text: string }
+  | { kind: 'project'; name: string; stack: string[]; path: string }
 type UserMessage = { role: 'user'; text: string }
 type AssistantMessage = {
   role: 'assistant'; parts: Part[]; state: 'streaming' | 'done' | 'stopped' | 'error'
   answer?: string; error?: string; meta?: string
 }
 type Message = UserMessage | AssistantMessage
-
-const SUGGESTIONS = ['这个项目的入口在哪里？', '帮我解释一下项目结构', '查找某个方法的实现并说明调用方']
+// send 为 false 时只填入输入框，由用户补全（如项目路径）后再发送。
+type Suggestion = { text: string; send: boolean }
 // 各平台沿用主流网页 AI 对话的习惯：Enter 发送；Mac 用 Option+Enter、Windows 用 Shift+Enter 换行，两种组合在两个平台都可用。
 const isMac = /mac/i.test((navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform ?? navigator.platform)
 const newlineKeys = isMac ? ['⌥ Option', 'Enter'] : ['Shift', 'Enter']
 // 停止请求发出后仍未结束（例如模型迟迟没有输出）时，直接断开连接。
 const STOP_TIMEOUT_MS = 5000
 
-const project = ref('')
+// 会话在发送第一条消息时创建；项目在对话中按需打开。
 const session = ref('')
-const activeProject = ref('')
-const editingProject = ref(true)
+const sessionProjects = ref<SessionProject[]>([])
+const authorized = ref<ProjectProfile[]>([])
+const confirmingRevoke = ref('')
+const sidebarError = ref('')
 const sidebarOpen = ref(false)
 const input = ref('')
 const messages = ref<Message[]>([])
 const busy = ref(false)
 const stopping = ref(false)
-const creating = ref(false)
 const error = ref('')
-const projectError = ref('')
 const startedAt = ref(0)
 const now = ref(0)
 let ticker: number | undefined
@@ -47,35 +53,85 @@ let pinned = true
 
 const conversation = ref<HTMLElement | null>(null)
 const composer = ref<HTMLTextAreaElement | null>(null)
-const projectInput = ref<HTMLInputElement | null>(null)
 
-const projectName = computed(() => activeProject.value.split('/').filter(Boolean).pop() ?? '')
 const elapsed = computed(() => Math.max(0, Math.floor((now.value - startedAt.value) / 1000)))
-const status = computed(() => stopping.value ? '正在停止' : busy.value ? '回答中' : session.value ? '就绪' : '未选择项目')
+const status = computed(() => stopping.value ? '正在停止' : busy.value ? '回答中' : '就绪')
+const openPaths = computed(() => new Set(sessionProjects.value.map(project => project.path)))
+const suggestions = computed<Suggestion[]>(() => {
+  const recent = authorized.value[0]
+  const general = recent
+    ? [{ text: `${recent.name} 的项目结构是怎样的？`, send: true }, { text: `${recent.name} 的入口在哪里？`, send: true }]
+    : [{ text: '用一个简单的例子解释什么是闭包', send: true }, { text: 'REST API 的分页应该怎么设计？', send: true }]
+  return [...general, { text: '分析一个本地项目：~/', send: false }]
+})
+const hue = (name: string) => `hue-${projectHue(name)}`
+const errorText = (e: unknown, fallback: string) => e instanceof Error ? e.message : fallback
 
 function focusComposer() {
   nextTick(() => composer.value?.focus())
 }
 
-function openProjectEditor() {
-  editingProject.value = true
-  sidebarOpen.value = true
-  project.value = activeProject.value || project.value
-  nextTick(() => { projectInput.value?.focus(); projectInput.value?.select() })
+// 侧栏的项目信息获取失败不影响聊天。
+async function refreshProjects() {
+  try {
+    const [all, current] = await Promise.all([
+      getJson('/api/projects'),
+      session.value ? getJson(`/api/sessions/${session.value}/projects`) : { projects: [] },
+    ])
+    authorized.value = all.projects
+    sessionProjects.value = current.projects
+  } catch { /* 忽略 */ }
 }
 
-async function createSession() {
-  if (!project.value.trim() || creating.value || busy.value) return
-  creating.value = true; projectError.value = ''
+async function ensureSession() {
+  if (!session.value) session.value = (await postJson('/api/sessions')).session_id
+  return session.value
+}
+
+function resetSession() {
+  session.value = ''
+  sessionProjects.value = []
+}
+
+function newChat() {
+  if (busy.value) return
+  // 释放旧会话，失败不影响新对话。
+  if (session.value) deleteEmpty(`/api/sessions/${session.value}`).catch(() => {})
+  resetSession()
+  messages.value = []; error.value = ''; sidebarOpen.value = false
+  focusComposer()
+}
+
+// 把已授权项目加入当前对话，不产生新的授权。
+async function addToSession(profile: ProjectProfile) {
+  if (busy.value || openPaths.value.has(profile.path)) return
+  sidebarError.value = ''
   try {
-    const data = await postJson('/api/sessions', { project_path: project.value })
-    // 切换项目后释放旧会话，失败不影响新会话。
-    if (session.value) fetch(`/api/sessions/${session.value}`, { method: 'DELETE' }).catch(() => {})
-    session.value = data.session_id; activeProject.value = data.project_path; messages.value = []
-    editingProject.value = false; sidebarOpen.value = false
+    await ensureSession()
+    sessionProjects.value = (await postJson(`/api/sessions/${session.value}/projects`, { path: profile.path })).projects
+    sidebarOpen.value = false
     focusComposer()
-  } catch (e) { projectError.value = e instanceof Error ? e.message : '无法创建会话' }
-  finally { creating.value = false }
+  } catch (e) { sidebarError.value = errorText(e, '无法加入项目') }
+}
+
+// 第一次点击进入确认状态，再次点击才撤销授权。
+async function revoke(profile: ProjectProfile) {
+  if (confirmingRevoke.value !== profile.path) { confirmingRevoke.value = profile.path; return }
+  confirmingRevoke.value = ''; sidebarError.value = ''
+  try {
+    await postEmpty('/api/projects/revoke', { path: profile.path })
+    await refreshProjects()
+  } catch (e) { sidebarError.value = errorText(e, '撤销授权失败') }
+}
+
+function useSuggestion(item: Suggestion) {
+  if (item.send) { send(item.text); return }
+  input.value = item.text
+  nextTick(() => {
+    resizeComposer()
+    const el = composer.value
+    if (el) { el.focus(); el.setSelectionRange(el.value.length, el.value.length) }
+  })
 }
 
 // 用户向上翻看时不强制滚动；回到底部附近后恢复跟随。
@@ -145,6 +201,16 @@ function applyEvent(reply: AssistantMessage, event: ChatEvent) {
     case 'context_trimmed':
       reply.parts.push({ kind: 'notice', text: event.reason })
       break
+    case 'project_opened': {
+      // 并入对应的 open_project 调用，避免把同一组工具卡片拆开；找不到时单独显示一行。
+      const opened = { name: event.name, stack: event.stack, path: event.path }
+      const call = reply.parts.flatMap(part => part.kind === 'tools' ? part.calls : [])
+        .reverse().find(item => item.name === 'open_project' && !item.opened)
+      if (call) call.opened = opened
+      else reply.parts.push({ kind: 'project', ...opened })
+      refreshProjects()
+      break
+    }
     case 'done':
       reply.state = 'done'; reply.answer = event.answer; reply.meta = formatMeta(event)
       break
@@ -159,7 +225,6 @@ function applyEvent(reply: AssistantMessage, event: ChatEvent) {
 async function send(preset?: string) {
   const text = (preset ?? input.value).trim()
   if (!text || busy.value) return
-  if (!session.value) { projectError.value = '请先选择要分析的项目'; openProjectEditor(); return }
   busy.value = true; error.value = ''
   if (preset === undefined) input.value = ''
   nextTick(resizeComposer)
@@ -171,12 +236,18 @@ async function send(preset?: string) {
   scrollToBottom(true)
   controller = new AbortController()
   try {
+    await ensureSession()
     for await (const event of streamChat(`/api/sessions/${session.value}/messages/stream`, { message: text }, controller.signal)) {
       applyEvent(reply, event)
     }
     if (reply.state === 'streaming') throw new StreamError('连接中断，回答不完整')
   } catch (e) {
-    const message = e instanceof Error ? e.message : '发送失败，请重试'
+    let message = errorText(e, '发送失败，请重试')
+    if (e instanceof HttpError && e.status === 404) {
+      // 服务重启后旧会话已不存在：开始新对话，请用户重新发送。
+      resetSession()
+      message = '会话已失效（服务可能已重启），已开始新对话，请重新发送'
+    }
     if (controller.signal.aborted) reply.state = 'stopped'
     else if (!reply.parts.length) {
       // 尚未收到任何内容：撤回这次提问，问题放回输入框便于重试。
@@ -192,6 +263,7 @@ async function send(preset?: string) {
     busy.value = false; stopping.value = false
     focusComposer()
     nextTick(resizeComposer)
+    refreshProjects()
   }
 }
 
@@ -226,11 +298,6 @@ function insertNewline() {
   resizeComposer()
 }
 
-function onProjectKeydown(event: KeyboardEvent) {
-  if (event.key === 'Enter' && !isComposing(event)) { event.preventDefault(); createSession() }
-  if (event.key === 'Escape' && session.value) editingProject.value = false
-}
-
 function resizeComposer() {
   const el = composer.value
   if (!el) return
@@ -242,29 +309,37 @@ function argsOf(call: ToolCall): Record<string, unknown> {
   return call.arguments && typeof call.arguments === 'object' ? call.arguments as Record<string, unknown> : {}
 }
 
+// 与回答中的引用格式一致：指定了项目时写成“项目:路径”。
 function describeCall(call: ToolCall) {
   if (typeof call.arguments === 'string') return `${call.name}（参数无效）`
   const args = argsOf(call)
+  const project = args.project ? `${args.project}:` : ''
+  if (call.name === 'open_project') return `打开项目 ${call.opened?.name ?? args.path ?? ''}`
   if (call.name === 'read_file') {
     const range = args.start || args.end ? `:${args.start ?? 1}-${args.end ?? ''}` : ''
-    return `读取 ${args.path ?? '?'}${range}`
+    return `读取 ${project}${args.path ?? '?'}${range}`
   }
-  if (call.name === 'search_code') return `搜索 “${args.query ?? ''}”`
-  if (call.name === 'list_files') return `列出 ${args.path || '项目根目录'}`
+  if (call.name === 'search_code') return `搜索 “${args.query ?? ''}”${args.project ? `（${args.project}）` : ''}`
+  if (call.name === 'list_files') return `列出 ${project}${args.path && args.path !== '.' ? args.path : '根目录'}`
   return `调用 ${call.name}`
 }
 
 function callMeta(call: ToolCall) {
   if (call.status === 'running') return '进行中'
   if (call.status === 'error') return '失败'
+  if (call.opened) return call.opened.stack.join(' · ') || '未识别技术栈'
   return `${call.lines ?? 0} 行${call.truncated ? '·已截断' : ''}`
 }
 
 function toolsTitle(calls: ToolCall[]) {
   const running = calls.find(call => call.status === 'running')
   if (running) return `正在${describeCall(running)}`
+  const opened = calls.flatMap(call => call.opened ? [call.opened.name] : [])
+  const lookups = calls.filter(call => call.name !== 'open_project').length
   const failed = calls.filter(call => call.status === 'error').length
-  return `查阅了 ${calls.length} 处代码${failed ? `，${failed} 次失败` : ''}`
+  const items = [opened.length ? `打开项目 ${opened.join('、')}` : '', lookups ? `查阅 ${lookups} 次` : '']
+  const title = items.filter(Boolean).join(' · ') || `执行了 ${calls.length} 次操作`
+  return failed ? `${title}，${failed} 次失败` : title
 }
 
 // 等待模型输出时显示的提示：还没有内容，或工具刚执行完、模型尚未继续输出。
@@ -293,6 +368,7 @@ function copyMessage(event: MouseEvent, message: AssistantMessage) {
   copyText(event.currentTarget as HTMLElement, text)
 }
 
+onMounted(refreshProjects)
 onBeforeUnmount(() => { window.clearInterval(ticker); window.clearTimeout(stopTimer); controller?.abort() })
 </script>
 
@@ -301,37 +377,52 @@ onBeforeUnmount(() => { window.clearInterval(ticker); window.clearTimeout(stopTi
     <aside :class="['sidebar', { open: sidebarOpen }]">
       <div class="brand">
         <span class="brand-mark">C</span>
-        <div class="brand-text"><strong>CodeChat</strong><small>代码分析助手</small></div>
+        <div class="brand-text"><strong>CodeChat</strong><small>对话与代码分析</small></div>
         <button class="icon-button only-mobile" aria-label="关闭侧栏" @click="sidebarOpen = false">✕</button>
       </div>
 
+      <button class="new-chat" :disabled="busy" @click="newChat">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>新对话
+      </button>
+
       <section class="panel">
-        <div class="panel-title">项目</div>
-        <div v-if="session && !editingProject" class="project-card">
-          <div class="project-icon">▤</div>
-          <div class="project-meta">
-            <strong :title="activeProject">{{ projectName }}</strong>
-            <small :title="activeProject">{{ activeProject }}</small>
-          </div>
-          <button class="ghost-button" @click="openProjectEditor">切换</button>
-        </div>
-        <form v-else class="project-form" @submit.prevent="createSession">
-          <input
-            id="project" ref="projectInput" v-model="project" :disabled="creating" autocomplete="off" spellcheck="false"
-            placeholder="输入本机项目的绝对路径" aria-label="项目路径" @keydown="onProjectKeydown"
-          >
-          <div class="form-actions">
-            <button v-if="session" type="button" class="ghost-button" @click="editingProject = false">取消</button>
-            <button type="submit" class="primary-button" :disabled="creating || !project.trim()">
-              {{ creating ? '正在打开…' : session ? '切换并新建对话' : '打开项目' }}
-            </button>
-          </div>
-          <p v-if="projectError" class="error" role="alert">{{ projectError }}</p>
-          <p v-if="session" class="panel-note">切换后将开始新的对话，当前对话不会保留。</p>
-        </form>
+        <div class="panel-title">当前对话的项目</div>
+        <ul v-if="sessionProjects.length" class="project-list">
+          <li v-for="item in sessionProjects" :key="item.path" class="project-row" :title="item.path">
+            <span :class="['project-dot', hue(item.alias)]"></span>
+            <div class="project-meta">
+              <strong>{{ item.alias }}</strong>
+              <small>{{ item.stack.join(' · ') || '未识别技术栈' }}</small>
+            </div>
+            <span v-if="item.recent && sessionProjects.length > 1" class="tag">最近</span>
+          </li>
+        </ul>
+        <p v-else class="panel-note">尚未打开项目。在消息中写出项目路径即可，如 <code>~/Projects/my-app</code>。</p>
       </section>
 
-      <p class="sidebar-foot">读取到的代码片段会发送给配置的模型服务，请只选择允许分析的项目。会话仅保留在服务运行期间。</p>
+      <section class="panel grow">
+        <div class="panel-title">已授权项目<span v-if="authorized.length" class="count">{{ authorized.length }}</span></div>
+        <ul v-if="authorized.length" class="project-list">
+          <li v-for="item in authorized" :key="item.path" class="project-row action">
+            <button
+              class="project-open" :disabled="busy || openPaths.has(item.path)"
+              :title="openPaths.has(item.path) ? '已在当前对话中打开' : `加入当前对话：${item.path}`" @click="addToSession(item)"
+            >
+              <span :class="['project-dot', hue(item.name)]"></span>
+              <span class="project-meta"><strong>{{ item.name }}</strong><small>{{ item.path }}</small></span>
+              <span v-if="openPaths.has(item.path)" class="tag">已打开</span>
+            </button>
+            <button
+              :class="['revoke', { confirm: confirmingRevoke === item.path }]" :aria-label="`撤销 ${item.name} 的授权`"
+              @click="revoke(item)" @blur="confirmingRevoke = ''"
+            >{{ confirmingRevoke === item.path ? '撤销授权' : '✕' }}</button>
+          </li>
+        </ul>
+        <p v-else class="panel-note">打开过的项目会出现在这里，之后直接说项目名称即可。</p>
+        <p v-if="sidebarError" class="error" role="alert">{{ sidebarError }}</p>
+      </section>
+
+      <p class="sidebar-foot">已授权项目中被读取的代码片段会发送给配置的模型服务。对话仅保留在服务运行期间。</p>
     </aside>
     <div v-if="sidebarOpen" class="scrim only-mobile" @click="sidebarOpen = false"></div>
 
@@ -339,22 +430,22 @@ onBeforeUnmount(() => { window.clearInterval(ticker); window.clearTimeout(stopTi
       <header class="topbar">
         <button class="icon-button only-mobile" aria-label="打开侧栏" @click="sidebarOpen = true">☰</button>
         <div class="topbar-title">
-          <strong>{{ projectName || '代码对话' }}</strong>
-          <small v-if="activeProject" :title="activeProject">{{ activeProject }}</small>
+          <strong>{{ messages.length ? '对话' : '新对话' }}</strong>
+          <span v-for="item in sessionProjects.slice(0, 3)" :key="item.path" :class="['chip', hue(item.alias)]" :title="item.path">{{ item.alias }}</span>
+          <span v-if="sessionProjects.length > 3" class="chip more">+{{ sessionProjects.length - 3 }}</span>
         </div>
-        <span :class="['status', { ready: session && !busy, busy }]"><i></i>{{ status }}</span>
+        <span :class="['status', { ready: !busy, busy }]"><i></i>{{ status }}</span>
       </header>
 
       <div ref="conversation" class="conversation" @click="onConversationClick" @scroll.passive="onConversationScroll">
         <div class="thread">
           <section v-if="!messages.length" class="welcome">
             <div class="welcome-mark">✳</div>
-            <h1>{{ session ? `开始分析 ${projectName}` : '从一个代码问题开始' }}</h1>
-            <p>{{ session ? '助手会先搜索和读取项目代码，再结合真实文件与行号回答。' : '先选择一个本地项目，再向助手提问。' }}</p>
-            <button v-if="!session" class="primary-button" @click="openProjectEditor">选择项目</button>
+            <h1>有什么可以帮你？</h1>
+            <p>可以直接聊天；需要分析代码时，在消息里写出项目路径，或提到已授权项目的名称。</p>
             <div class="suggestions">
-              <button v-for="item in SUGGESTIONS" :key="item" class="suggestion" :disabled="busy" @click="send(item)">
-                <span>{{ item }}</span><span class="arrow">→</span>
+              <button v-for="item in suggestions" :key="item.text" class="suggestion" :disabled="busy" @click="useSuggestion(item)">
+                <span>{{ item.text }}</span><span class="arrow">{{ item.send ? '→' : '✎' }}</span>
               </button>
             </div>
           </section>
@@ -378,12 +469,16 @@ onBeforeUnmount(() => { window.clearInterval(ticker); window.clearTimeout(stopTi
                     <ul>
                       <li v-for="call in part.calls" :key="call.id" :class="`is-${call.status}`" :title="call.summary">
                         <span :class="['tool-icon', `is-${call.status}`]"></span>
-                        <code>{{ describeCall(call) }}</code>
+                        <code :title="call.opened?.path">{{ describeCall(call) }}</code>
                         <span class="tool-meta">{{ callMeta(call) }}</span>
                         <small v-if="call.status === 'error' && call.summary" class="tool-error">{{ call.summary }}</small>
                       </li>
                     </ul>
                   </details>
+                  <p v-else-if="part.kind === 'project'" class="opened" :title="part.path">
+                    <span :class="['project-dot', hue(part.name)]"></span>已打开项目 <b>{{ part.name }}</b>
+                    <span class="opened-stack">{{ part.stack.join(' · ') || '未识别技术栈' }}</span>
+                  </p>
                   <p v-else class="notice">{{ part.text }}</p>
                 </template>
                 <div v-if="waitingLabel(message)" class="typing-body">
@@ -405,13 +500,13 @@ onBeforeUnmount(() => { window.clearInterval(ticker); window.clearTimeout(stopTi
         <p v-if="error" class="error" role="alert">{{ error }}</p>
         <form class="composer" @submit.prevent="send()">
           <textarea
-            ref="composer" v-model="input" rows="1" :disabled="!session" :placeholder="session ? `向 CodeChat 提问关于 ${projectName} 的问题` : '请先选择项目'"
+            ref="composer" v-model="input" rows="1" placeholder="给 CodeChat 发消息；分析代码时写出项目路径"
             aria-label="输入问题" @keydown="onComposerKeydown" @input="resizeComposer"
           ></textarea>
           <button v-if="busy" type="button" class="send stop" :disabled="stopping" aria-label="停止回答" title="停止回答（Esc）" @click="stop">
             <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="2" /></svg>
           </button>
-          <button v-else type="submit" class="send" :disabled="!session || !input.trim()" aria-label="发送">
+          <button v-else type="submit" class="send" :disabled="!input.trim()" aria-label="发送">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7" /></svg>
           </button>
         </form>

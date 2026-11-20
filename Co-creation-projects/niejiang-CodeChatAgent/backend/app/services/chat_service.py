@@ -9,7 +9,7 @@ from typing import Any
 
 from app.agents.chat_agent import create_chat_agent
 from app.projects.authorized import AuthorizedProjects
-from app.projects.project_set import ProjectSet
+from app.projects.project_set import ProjectAccessError, ProjectSet
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +125,25 @@ class CodeChatSession:
             except Exception:
                 logger.exception("对话请求失败")
                 yield {"type": "error", "code": "model_error", "message": "模型请求失败，请稍后重试"}
+        finally:
+            self._lock.release()
+
+    def project_list(self) -> list[dict[str, Any]]:
+        """当前会话已打开的项目，从最近使用开始；已撤销授权的项目不再列出。"""
+        self.projects.prune_revoked()
+        return [{**project.profile.to_dict(), "alias": project.alias, "recent": index == 0}
+                for index, project in enumerate(self.projects.projects())]
+
+    def add_project(self, path: str) -> None:
+        """把已授权项目加入当前会话；不产生新的授权。回答进行中时抛出 SessionBusyError。"""
+        root = open_project(path)
+        if not self._lock.acquire(blocking=False):
+            raise SessionBusyError("上一条消息仍在处理中，请稍后再试")
+        try:
+            if self.projects.authorized.covering(root) is None:
+                raise ProjectAccessError("只能加入已授权项目；新项目请在对话中写出路径")
+            self.projects.open(str(root))
+            self.projects.drain_opened()
         finally:
             self._lock.release()
 

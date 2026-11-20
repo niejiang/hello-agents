@@ -49,15 +49,32 @@ md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
   return renderLink(tokens, idx, options, env, self)
 }
 
-// 形如 backend/main.py:19 或 app.py:10-20 的文件引用。
-const CITE = /(?:[\w.-]+\/)*[\w.-]+\.[A-Za-z][A-Za-z0-9]*:\d+(?:-\d+)?/g
+// 形如 backend/main.py:19、app.py:10-20 的文件引用；打开多个项目时前面带项目简称，如 my-agent:src/tools.ts:42。
+// 项目简称可能带上级目录（如 old/alpha），不含点号，以免把路径误当作简称。
+const CITE = /(?:[\w-]+(?:\/[\w-]+)?:)?(?:[\w.-]+\/)*[\w.-]+\.[A-Za-z][A-Za-z0-9]*:\d+(?:-\d+)?/g
 const isCite = (text: string) => new RegExp(`^${CITE.source}$`).test(text)
+const CITE_PROJECT = /^([\w-]+(?:\/[\w-]+)?):(?=.*\.[A-Za-z][A-Za-z0-9]*:\d)/
+
+/** 同一项目始终使用同一种颜色。 */
+export function projectHue(name: string): number {
+  let hash = 0
+  for (const char of name) hash = (hash * 31 + char.codePointAt(0)!) >>> 0
+  return hash % 6
+}
+
+function renderCite(text: string) {
+  const match = CITE_PROJECT.exec(text)
+  if (!match) return `<span class="cite">${escape(text)}</span>`
+  const project = match[1]
+  return `<span class="cite"><b class="cite-project hue-${projectHue(project)}">${escape(project)}:</b>`
+    + `${escape(text.slice(match[0].length))}</span>`
+}
 
 md.renderer.rules.code_inline = (tokens, idx) => {
   const content = tokens[idx].content
-  return isCite(content) ? `<span class="cite">${escape(content)}</span>` : `<code>${escape(content)}</code>`
+  return isCite(content) ? renderCite(content) : `<code>${escape(content)}</code>`
 }
-md.renderer.rules.file_cite = (tokens, idx) => `<span class="cite">${escape(tokens[idx].content)}</span>`
+md.renderer.rules.file_cite = (tokens, idx) => renderCite(tokens[idx].content)
 
 // 将普通文本中的文件引用拆成独立标记，链接文字内部不处理。
 md.core.ruler.push('file_cite', (state) => {

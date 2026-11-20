@@ -11,6 +11,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field, field_validator
 
 from app.projects.project_set import ProjectAccessError
+from app.services import chat_service
 from app.services.chat_service import ProjectPathError, SessionBusyError, open_project
 from app.services.session_store import SessionStore
 
@@ -121,3 +122,37 @@ def stream_message(session_id: str, body: MessageRequest):
 def stop_message(session_id: str):
     """停止会话中正在生成的回答；没有进行中的回答时不产生影响。"""
     require_session(session_id).stop()
+
+
+class ProjectPathRequest(BaseModel):
+    path: str = Field(min_length=1, max_length=4096)
+
+
+@app.get('/api/projects')
+def list_authorized_projects():
+    """已授权项目清单，从最近授权开始。"""
+    return {'projects': [profile.to_dict() for profile in chat_service.authorized_store.list()]}
+
+
+@app.post('/api/projects/revoke', status_code=204)
+def revoke_project(body: ProjectPathRequest):
+    """撤销授权；正在使用该项目的会话随即失去访问权限。不存在时同样视为成功。"""
+    chat_service.authorized_store.remove(body.path)
+
+
+@app.get('/api/sessions/{session_id}/projects')
+def list_session_projects(session_id: str):
+    return {'projects': require_session(session_id).project_list()}
+
+
+@app.post('/api/sessions/{session_id}/projects')
+def add_session_project(session_id: str, body: ProjectPathRequest):
+    """把已授权项目加入当前会话，不产生新的授权。"""
+    session = require_session(session_id)
+    try:
+        session.add_project(body.path)
+    except (ProjectPathError, ProjectAccessError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except SessionBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {'projects': session.project_list()}

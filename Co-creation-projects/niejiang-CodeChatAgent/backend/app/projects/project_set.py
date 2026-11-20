@@ -121,6 +121,12 @@ class ProjectSet:
         """按最近使用从新到旧列出。"""
         return list(reversed(self._open.values()))
 
+    def prune_revoked(self) -> None:
+        """移出授权已被撤销的项目（供界面展示前调用）。"""
+        for project in list(self._open.values()):
+            if self.authorized.covering(project.root) is None:
+                self._open.pop(project.alias, None)
+
     def single_alias(self) -> str | None:
         return next(iter(self._open)) if len(self._open) == 1 else None
 

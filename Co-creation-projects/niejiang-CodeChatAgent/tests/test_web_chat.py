@@ -76,6 +76,30 @@ class WebChatTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn('系统目录', response.json()['detail'])
 
+    def test_authorized_projects_endpoints(self):
+        first = self.create()
+        root = first['project_path']
+        listed = self.client.get('/api/projects').json()['projects']
+        self.assertEqual([p['path'] for p in listed], [root])
+        session_projects = self.client.get(f"/api/sessions/{first['session_id']}/projects").json()['projects']
+        self.assertEqual([(p['path'], p['recent']) for p in session_projects], [(root, True)])
+
+        # 新对话可以加入已授权项目，但不能借此授权新目录。
+        second = self.client.post('/api/sessions').json()['session_id']
+        added = self.client.post(f'/api/sessions/{second}/projects', json={'path': root})
+        self.assertEqual([p['path'] for p in added.json()['projects']], [root])
+        with tempfile.TemporaryDirectory() as other:
+            rejected = self.client.post(f'/api/sessions/{second}/projects', json={'path': other})
+            self.assertEqual(rejected.status_code, 400)
+            self.assertIn('只能加入已授权项目', rejected.json()['detail'])
+        self.assertEqual(self.client.post('/api/sessions/missing/projects', json={'path': root}).status_code, 404)
+
+        # 撤销后两个会话都不再列出该项目。
+        self.assertEqual(self.client.post('/api/projects/revoke', json={'path': root}).status_code, 204)
+        self.assertEqual(self.client.get('/api/projects').json()['projects'], [])
+        for session_id in (first['session_id'], second):
+            self.assertEqual(self.client.get(f'/api/sessions/{session_id}/projects').json()['projects'], [])
+
     def test_invalid_path(self):
         self.assertEqual(self.client.post('/api/sessions', json={'project_path': '/does/not/exist'}).status_code, 400)
 
