@@ -1,5 +1,7 @@
 """验证代码工具的基本结果和项目目录边界。"""
 
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -46,12 +48,108 @@ class CodeWorkspaceTests(unittest.TestCase):
             listing = workspace.list_files()
             for name in (".aws", "id_ecdsa", ".git-credentials", ".git"):
                 self.assertNotIn(name, listing)
-            self.assertEqual(workspace.search("secret_token"), "未找到匹配内容。")
+            self.assertIn("未找到匹配内容", workspace.search("secret_token"))
             # 在不区分大小写的文件系统上，.GIT 与 .git 指向同一目录。
             for path in (".aws/credentials", "id_ecdsa", ".git-credentials", ".GIT/config", ".Git/config"):
                 with self.subTest(path=path), self.assertRaises((ValueError, OSError)):
                     workspace.read_file(path)
 
+
+
+class SearchTests(unittest.TestCase):
+    """search_code / find_files / read_file 的增强行为。"""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name).resolve()
+        files = {
+            "src/main/java/OrderService.java": "class OrderService {\n  void createOrder() {}\n  void created() {}\n}\n",
+            "src/main/java/OrderController.java": "class OrderController {\n  // calls createOrder\n}\n",
+            "src/test/java/OrderServiceTest.java": "class OrderServiceTest {\n  void testCreateOrder() {}\n}\n",
+            "web/app.ts": "export function createOrder() {}\n",
+            "web/app.min.js": "function createOrder(){}\n",
+            "package-lock.json": "{\"createOrder\": 1}\n",
+        }
+        for name, content in files.items():
+            path = self.root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+        # GBK 编码、含中文注释的旧代码。
+        (self.root / "src/main/java/Legacy.java").write_bytes("// 订单服务\nclass Legacy { void createOrder() {} }\n".encode("gbk"))
+        self.ws = CodeWorkspace(self.root)
+
+    def test_gbk_files_are_searched_and_read(self):
+        result = self.ws.search("createOrder", glob="Legacy.java")
+        self.assertIn("src/main/java/Legacy.java:2: class Legacy", result)
+        self.assertIn("按 GB18030 编码读取", result)
+        content = self.ws.read_file("src/main/java/Legacy.java")
+        self.assertIn("编码 GB18030", content.splitlines()[0])
+        self.assertIn("1: // 订单服务", content)
+
+    def test_generated_files_skipped_and_scope_filters(self):
+        everywhere = self.ws.search("createOrder")
+        self.assertNotIn("app.min.js", everywhere)
+        self.assertNotIn("package-lock.json", everywhere)
+        java = self.ws.search("createOrder", glob="*.java", path="src/main")
+        self.assertNotIn("web/app.ts", java)
+        self.assertNotIn("OrderServiceTest", java)
+        self.assertIn("src/main/java/OrderService.java:2:", java)
+        self.assertEqual(self.ws.search("createorder", case_sensitive=True, glob="*.ts"), "在 .（*.ts） 中未找到匹配内容。")
+        braces = self.ws.search("createOrder", glob="*.{ts,java}", output="files")
+        self.assertIn("web/app.ts（1）", braces)
+
+    def test_regex_and_context(self):
+        exact = self.ws.search(r"\bcreateOrder\(", regex=True, glob="OrderService*.java")
+        self.assertIn("OrderService.java:2:", exact)
+        self.assertNotIn("testCreateOrder", exact)
+        with self.assertRaisesRegex(ValueError, "正则表达式无效"):
+            self.ws.search("(", regex=True)
+        context = self.ws.search("void createOrder", context=1, glob="OrderService.java")
+        self.assertEqual(context.splitlines(), [
+            "src/main/java/OrderService.java-1- class OrderService {",
+            "src/main/java/OrderService.java:2:   void createOrder() {}",
+            "src/main/java/OrderService.java-3-   void created() {}",
+        ])
+
+    def test_truncation_reports_totals_and_remaining_files(self):
+        result = self.ws.search("order", limit=2)
+        summary = next(line for line in result.splitlines() if line.startswith("[结果已截断"))
+        self.assertIn("以上显示前 2 处", summary)
+        self.assertIn("未显示的文件：", summary)
+        self.assertIn("web/app.ts（1）", summary)
+        count = self.ws.search("createOrder", output="count")
+        self.assertTrue(count.startswith("共 5 处匹配，分布在 5 个文件："), count)
+
+    def test_find_files(self):
+        self.assertEqual(self.ws.find_files("*Controller.java"), "src/main/java/OrderController.java")
+        self.assertEqual(self.ws.find_files("OrderService").splitlines(),
+                         ["src/main/java/OrderService.java", "src/test/java/OrderServiceTest.java"])
+        self.assertEqual(self.ws.find_files("src/**/*Test.java"), "src/test/java/OrderServiceTest.java")
+        self.assertIn("共 4 个文件", self.ws.find_files("*.java", limit=2))
+        self.assertEqual(self.ws.find_files("*.py"), "未找到匹配的文件。")
+
+    def test_read_file_limits_and_total_lines(self):
+        (self.root / "long.py").write_text("".join(f"line{i}\n" for i in range(1, 701)), encoding="utf-8")
+        result = self.ws.read_file("long.py", 1, 500)
+        self.assertTrue(result.startswith("文件：long.py（共 700 行）"))
+        self.assertIn("500: line500", result)
+        self.assertIn("以下还有 200 行，可继续读取 501-700", result)
+        with self.assertRaisesRegex(ValueError, "最多读取 500 行"):
+            self.ws.read_file("long.py", 1, 501)
+
+    @unittest.skipUnless(shutil.which("git"), "需要 git")
+    def test_gitignore_is_respected(self):
+        subprocess.run(["git", "init", "-q"], cwd=self.root, check=True)
+        (self.root / ".gitignore").write_text("generated/\n", encoding="utf-8")
+        (self.root / "generated").mkdir()
+        (self.root / "generated" / "Out.java").write_text("void createOrder() {}\n", encoding="utf-8")
+        self.assertNotIn("generated/Out.java", self.ws.search("createOrder"))
+        self.assertNotIn("generated/Out.java", self.ws.find_files("*.java"))
+        self.assertIn("src/main/java/OrderService.java", self.ws.find_files("*.java"))
+        # 打开的目录本身被外层仓库忽略时，仍能搜索其中的文件。
+        ignored = CodeWorkspace(self.root / "generated")
+        self.assertIn("Out.java:1:", ignored.search("createOrder"))
 
 if __name__ == "__main__":
     unittest.main()

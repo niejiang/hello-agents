@@ -15,7 +15,7 @@ from hello_agents.agents import FunctionCallAgent
 from app.projects.authorized import AuthorizedProjects
 from app.projects.permissions import ALLOW, STOPPED, TIMEOUT, PermissionBroker
 from app.projects.project_set import ProjectSet
-from app.tools.code_tools import create_code_registry
+from app.tools.code_tools import DEFAULT_READ_LINES, create_code_registry
 
 logger = logging.getLogger(__name__)
 
@@ -107,9 +107,15 @@ def describe_call(name: str, arguments: dict[str, Any], default_project: str | N
     project = arguments.get("project") or default_project
     where = f"在 {project} 中" if project else ("在全部已打开项目中" if name == "search_code" else "")
     if name == "read_file":
-        return f"{where}读取了 {arguments.get('path', '?')}:{arguments.get('start', 1)}-{arguments.get('end', 100)}"
+        return f"{where}读取了 {arguments.get('path', '?')}:{arguments.get('start', 1)}-{arguments.get('end', DEFAULT_READ_LINES)}"
     if name == "search_code":
-        return f"{where}搜索了“{arguments.get('query', '')}”"
+        # 范围和选项不同的搜索不算重复调用（M2 去重依据此说明）。
+        scope = [f"{key}={arguments[key]}" for key in ("path", "glob", "regex", "case_sensitive", "context", "output", "limit")
+                 if arguments.get(key) not in (None, "", ".", False, 0)]
+        return f"{where}搜索了“{arguments.get('query', '')}”" + (f"（{'，'.join(scope)}）" if scope else "")
+    if name == "find_files":
+        scope = f"（path={arguments['path']}）" if arguments.get("path") not in (None, "", ".") else ""
+        return f"{where}查找了文件 {arguments.get('pattern', '')}{scope}"
     if name == "list_files":
         return f"{where}列出了 {arguments.get('path') or '.'}"
     return f"调用了 {name}"
@@ -473,7 +479,12 @@ SYSTEM_PROMPT = """你是一个友好的通用助手，擅长分析代码，请�
 5. 有多个可能或无法确定：列出候选请用户选择，不要猜测；找不到时请用户给出项目路径。
 open_project 优先使用用户消息中写出的路径或已授权项目。其他路径（例如代码中提到的另一个目录）只在确有必要时尝试，打开前需要用户在界面上确认；用户拒绝或超时后不要再次尝试。
 
-【查看代码】涉及项目代码的问题先用工具查证：用 search_code 定位，再用 read_file 读取相关代码；了解结构时用 list_files。打开多个项目时，list_files、read_file 必须用 project 参数指定项目；search_code 省略 project 会搜索全部已打开项目。相互独立的查询可以在同一轮中同时调用多个工具，例如比较两个项目时对两边同时搜索。
+【查看代码】涉及项目代码的问题先用工具查证，按“找文件 → 缩小范围 → 读代码”的顺序：
+1. 不知道文件在哪时，用 find_files 按文件名查找（如 *Controller.java、UserService），用 list_files 了解目录结构。
+2. 用 search_code 定位定义和调用处。关键词常见时，用 path 限定目录、glob 限定文件类型（如 *.java），或用 regex 精确匹配（如 \\bcreateOrder\\(、class\\s+OrderService）；需要先了解分布时设 output 为 files 或 count；需要看上下文时设 context。
+3. 搜索结果出现“结果已截断”时，说明还有未显示的匹配，应缩小范围后再搜，不要只依据部分结果下结论。
+4. 用 read_file 读取相关代码，一次可读较大范围（最多 500 行）；结果会给出文件总行数。
+打开多个项目时，list_files、read_file、find_files 必须用 project 参数指定项目；search_code 省略 project 会搜索全部已打开项目。相互独立的查询可以在同一轮中同时调用多个工具，例如比较两个项目时对两边同时搜索。
 
 【引用】回答时引用真实的相对路径和行号，不要编造证据。只打开一个项目时格式如 backend/main.py:19；打开多个项目时在前面加项目简称，如 my-agent:src/tools.ts:42。
 

@@ -463,7 +463,12 @@ function describeCall(call: ToolCall) {
     const range = args.start || args.end ? `:${args.start ?? 1}-${args.end ?? ''}` : ''
     return `读取 ${project}${args.path ?? '?'}${range}`
   }
-  if (call.name === 'search_code') return `搜索 “${args.query ?? ''}”${args.project ? `（${args.project}）` : ''}`
+  if (call.name === 'search_code') {
+    const scope = [args.project, args.path && args.path !== '.' ? args.path : '', args.glob, args.regex ? '正则' : '',
+      args.output === 'files' ? '只列文件' : args.output === 'count' ? '统计' : ''].filter(Boolean)
+    return `搜索 “${args.query ?? ''}”${scope.length ? `（${scope.join(' · ')}）` : ''}`
+  }
+  if (call.name === 'find_files') return `查找文件 ${project}${args.pattern ?? ''}${args.path && args.path !== '.' ? `（${args.path}）` : ''}`
   if (call.name === 'list_files') return `列出 ${project}${args.path && args.path !== '.' ? args.path : '根目录'}`
   return `调用 ${call.name}`
 }

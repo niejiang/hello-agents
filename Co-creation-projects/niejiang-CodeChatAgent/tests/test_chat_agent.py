@@ -135,7 +135,7 @@ class ChatAgentTests(unittest.TestCase):
         self.assertTrue(request["stream"])
         self.assertEqual(request["stream_options"], {"include_usage": True})
         schemas = {tool["function"]["name"]: tool["function"]["parameters"] for tool in request["tools"]}
-        self.assertEqual(set(schemas), {"open_project", "list_files", "search_code", "read_file"})
+        self.assertEqual(set(schemas), {"open_project", "list_files", "search_code", "find_files", "read_file"})
         self.assertTrue(all(schema["additionalProperties"] is False for schema in schemas.values()))
         self.assertEqual(schemas["read_file"]["properties"]["start"]["minimum"], 1)
         self.assertEqual(request["tool_choice"], "auto")
@@ -297,7 +297,7 @@ class ChatAgentTests(unittest.TestCase):
         """未打开项目时工具集不变，文件工具提示先打开项目；用户消息不附加空的项目清单。"""
         with patch.dict("os.environ", ENV):
             agent = create_chat_agent(None)
-        self.assertEqual(len(agent._build_tool_schemas()), 4)
+        self.assertEqual(len(agent._build_tool_schemas()), 5)
         agent.llm._client = self.agent.llm._client
         completions = FakeCompletions([tool_round(("c1", "read_file", json.dumps({"path": "a.py"}))), [chunk("请提供路径")]])
         agent.llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))

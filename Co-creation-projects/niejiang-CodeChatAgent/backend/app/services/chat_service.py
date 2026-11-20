@@ -15,7 +15,8 @@ from app.storage.chat_store import ChatStore, StoredTurn
 
 logger = logging.getLogger(__name__)
 
-MAX_TOOL_ITERATIONS = 6
+# 每个问题最多的工具调用轮数；上下文增长由 M2 清理旧工具结果兜底。
+MAX_TOOL_ITERATIONS = 15
 MAX_ANSWER_TOKENS = 4096
 # 已授权项目清单保存在本机，不提交到仓库（见 .gitignore 中的 data/）。
 AUTHORIZED_PROJECTS_FILE = Path(__file__).resolve().parents[3] / "data" / "authorized_projects.json"

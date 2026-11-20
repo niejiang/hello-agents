@@ -7,14 +7,15 @@ from pathlib import Path
 
 from app.projects.authorized import AuthorizedProjects
 from app.projects.profile import ProjectProfile, detect_profile
-from app.tools.code_tools import CodeWorkspace, is_blocked_name
+from app.tools.code_tools import (
+    DEFAULT_FIND_LIMIT, DEFAULT_READ_LINES, DEFAULT_SEARCH_LIMIT, CodeWorkspace, is_blocked_name,
+)
 
 MAX_OPEN_PROJECTS = 5
 MAX_LISTED_AUTHORIZED = 20
 NOTE_SUMMARY_CHARS = 60
 # 路径中可以出现在名称里的字符；用于判断用户原话中的路径是否在此处结束。
 PATH_NAME_CHAR = re.compile(r"[A-Za-z0-9_.\-]")
-SEARCH_LINE = re.compile(r"^.+?:\d+: ")
 
 
 class ProjectAccessError(ValueError):
@@ -292,29 +293,44 @@ class ProjectSet:
         target = self.resolve(project)
         return f"项目：{target.alias}\n{target.workspace.list_files(path)}"
 
-    def tool_read(self, path: str, start: int = 1, end: int = 100, project: str | None = None) -> str:
+    def tool_read(self, path: str, start: int = 1, end: int = DEFAULT_READ_LINES, project: str | None = None) -> str:
         target = self.resolve(project)
         return f"项目：{target.alias}\n{target.workspace.read_file(path, start, end)}"
 
-    def tool_search(self, query: str, project: str | None = None) -> str:
+    def tool_search(self, query: str, project: str | None = None, path: str = ".", glob: str | None = None,
+                    regex: bool = False, case_sensitive: bool = False, context: int = 0, output: str = "content",
+                    limit: int = DEFAULT_SEARCH_LIMIT) -> str:
+        options = dict(path=path, glob=glob, regex=regex, case_sensitive=case_sensitive, context=context,
+                       output=output, limit=limit)
         if project or len(self._open) <= 1:
             target = self.resolve(project)
-            return f"项目：{target.alias}\n{target.workspace.search(query)}"
-        # 未指定项目且打开了多个项目：逐个搜索，结果行前加项目简称。
+            return f"项目：{target.alias}\n{target.workspace.search(query, **options)}"
+        # 未指定项目且打开了多个项目：逐个搜索，路径前加项目简称；搜索全部项目时不更新“最近使用”。
+        return self._each_project(lambda target: target.workspace.search(query, label=f"{target.alias}:", **options),
+                                  "在已打开的项目中未找到匹配内容。")
+
+    def tool_find(self, pattern: str, project: str | None = None, path: str = ".", limit: int = DEFAULT_FIND_LIMIT) -> str:
+        if project or len(self._open) <= 1:
+            target = self.resolve(project)
+            return f"项目：{target.alias}\n{target.workspace.find_files(pattern, path, limit)}"
+        return self._each_project(lambda target: target.workspace.find_files(pattern, path, limit, label=f"{target.alias}:"),
+                                  "在已打开的项目中未找到匹配的文件。")
+
+    def _each_project(self, run, empty: str) -> str:
         results: list[str] = []
         for target in list(self._open.values()):
             try:
-                # 搜索全部项目时不更新“最近使用”，以免打乱代词指向。
-                found = self._check(target).workspace.search(query)
+                found = run(self._check(target))
             except ValueError as exc:
                 results.append(f"（{target.alias}）{exc}")
                 continue
-            for line in found.splitlines():
-                if SEARCH_LINE.match(line):
-                    results.append(f"{target.alias}:{line}")
-                elif line != "未找到匹配内容。":
-                    results.append(f"（{target.alias}）{line}")
-        return "\n".join(results) or "在已打开的项目中未找到匹配内容。"
+            first, *rest = found.splitlines()
+            if "未找到" in first:
+                # 没有结果的项目只保留附加说明（如扫描不完整），避免噪音。
+                results.extend(f"（{target.alias}）{line}" for line in rest)
+            else:
+                results.append(found)
+        return "\n".join(results) or empty
 
     # ---- 提供给模型的项目清单 ----
 
