@@ -62,6 +62,19 @@ def main() -> int:
                     status = "✓" if event["ok"] else "✗"
                     print(f" → {status} {event['lines']} 行", flush=True)
                     at_line_start = True
+                elif kind == "permission_request":
+                    prefix = "" if at_line_start else "\n"
+                    print(f"{prefix}  ! 助手请求访问 {event['path']}", flush=True)
+                    print("    该路径不在你的消息中，也不在已授权项目中；允许后将加入已授权项目（只读）。", flush=True)
+                    try:
+                        answer = input("    允许吗？[y/N] ").strip().lower()
+                    except (EOFError, KeyboardInterrupt):
+                        answer = ""
+                    session.resolve_permission(event["id"], answer in {"y", "yes", "是"})
+                    at_line_start = True
+                elif kind == "permission_resolved":
+                    labels = {"allow": "已允许", "deny": "已拒绝", "timeout": "确认超时", "stopped": "已停止"}
+                    print(f"    （{labels.get(event['decision'], event['decision'])}）", flush=True)
                 elif kind == "project_opened":
                     stack = "·".join(event["stack"]) or "未识别技术栈"
                     print(f"  · 已打开项目 {event['name']}（{stack}，{event['path']}）", flush=True)

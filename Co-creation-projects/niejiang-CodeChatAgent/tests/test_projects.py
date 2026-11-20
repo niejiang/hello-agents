@@ -11,6 +11,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from app.agents.chat_agent import create_chat_agent
 from app.projects.authorized import AuthorizedProjects
+from app.projects.permissions import PermissionBroker
 from app.projects.profile import detect_profile
 from app.projects.project_set import ProjectAccessError, ProjectSet, mentioned_in
 from test_chat_agent import ENV, FakeCompletions, chunk, tool_round
@@ -215,6 +216,88 @@ class MultiProjectAgentTests(unittest.TestCase):
         result = [m for m in completions.requests[1]["messages"] if m["role"] == "tool"][0]["content"]
         self.assertIn("不在用户本轮消息中", result)
 
+
+
+class PermissionTests(unittest.TestCase):
+    """模型推断出的路径需要用户确认。"""
+
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        self.alpha = make_project(Path(temp.name).resolve() / "alpha", {"main.py": "def alpha():\n    return 1\n"})
+        self.store = AuthorizedProjects(None)
+        self.projects = ProjectSet(self.store)
+        self.broker = PermissionBroker(timeout=0.3)
+        with patch.dict("os.environ", ENV):
+            self.agent = create_chat_agent(self.projects, self.broker)
+        self.open_call = json.dumps({"path": str(self.alpha)})
+
+    def run_turn(self, rounds, decision=None, question="看看那个被引用的项目", should_stop=None):
+        completions = FakeCompletions(rounds)
+        self.agent.llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        events = []
+        for event in self.agent.run_stream(question, max_tool_iterations=3, should_stop=should_stop):
+            events.append(event)
+            if event["type"] == "permission_request" and decision is not None:
+                self.assertTrue(self.broker.resolve(event["id"], decision))
+        return events, completions
+
+    def tool_results(self, completions, index):
+        return [m["content"] for m in completions.requests[index]["messages"] if m["role"] == "tool"]
+
+    def test_allowed_path_is_opened_and_authorized(self):
+        events, _ = self.run_turn([tool_round(("c1", "open_project", self.open_call)), [chunk("好")]], decision=True)
+        kinds = [e["type"] for e in events]
+        self.assertEqual(kinds[:5], ["tool_start", "permission_request", "permission_resolved", "tool_end", "project_opened"])
+        request = events[1]
+        self.assertEqual((request["path"], request["tool_call_id"], request["timeout"]), (str(self.alpha), "c1", 0.3))
+        self.assertEqual(events[2]["decision"], "allow")
+        self.assertTrue(events[3]["ok"])
+        self.assertIsNotNone(self.store.covering(self.alpha))
+
+    def test_denied_path_is_not_asked_again_in_same_turn(self):
+        events, completions = self.run_turn(
+            [tool_round(("c1", "open_project", self.open_call)), tool_round(("c2", "open_project", self.open_call)),
+             [chunk("好的")]], decision=False)
+        self.assertEqual([e["type"] for e in events].count("permission_request"), 1)
+        self.assertIn("用户拒绝了访问", self.tool_results(completions, 1)[0])
+        self.assertIn("用户未允许访问该路径", self.tool_results(completions, 2)[1])
+        self.assertIsNone(self.store.covering(self.alpha))
+        self.assertEqual(self.projects.projects(), [])
+        # 下一轮可以重新询问。
+        events, _ = self.run_turn([tool_round(("c3", "open_project", self.open_call)), [chunk("好")]], decision=True)
+        self.assertIn("project_opened", [e["type"] for e in events])
+
+    def test_timeout_counts_as_denied(self):
+        events, completions = self.run_turn([tool_round(("c1", "open_project", self.open_call)), [chunk("好")]])
+        self.assertEqual(next(e for e in events if e["type"] == "permission_resolved")["decision"], "timeout")
+        self.assertIn("等待用户确认超时", self.tool_results(completions, 1)[0])
+
+    def test_stop_while_waiting(self):
+        stop = {"value": False}
+        completions = FakeCompletions([tool_round(("c1", "open_project", self.open_call)), [chunk("不应请求")]])
+        self.agent.llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        events = []
+        for event in self.agent.run_stream("看看", max_tool_iterations=3, should_stop=lambda: stop["value"]):
+            events.append(event)
+            if event["type"] == "permission_request":
+                stop["value"] = True
+        self.assertEqual([e["type"] for e in events][-2:], ["tool_end", "stopped"])
+        self.assertEqual(next(e for e in events if e["type"] == "permission_resolved")["decision"], "stopped")
+        self.assertEqual(len(completions.requests), 1)
+
+    def test_path_in_user_message_needs_no_confirmation(self):
+        events, _ = self.run_turn([tool_round(("c1", "open_project", self.open_call)), [chunk("好")]],
+                                  question=f"看看 {self.alpha}")
+        self.assertNotIn("permission_request", [e["type"] for e in events])
+        self.assertIn("project_opened", [e["type"] for e in events])
+
+    def test_broker_rejects_unknown_or_finished_requests(self):
+        broker = PermissionBroker(timeout=0.05)
+        self.assertFalse(broker.resolve("missing", True))
+        request_id = broker.create("/x")
+        self.assertEqual(broker.wait(request_id, lambda: False), "timeout")
+        self.assertFalse(broker.resolve(request_id, True))
 
 if __name__ == "__main__":
     unittest.main()

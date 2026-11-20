@@ -99,9 +99,6 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 }
 .chip.more { background: var(--surface-2); color: var(--muted); }
 
-.primary-button { flex: 1; }
-.panel-note { margin: 8px 4px 0; font-size: 12px; color: var(--muted); line-height: 1.5; }
-.sidebar-foot { margin: auto 4px 0; font-size: 12px; line-height: 1.6; color: var(--muted); }
 
 .primary-button {
   padding: 8px 14px; border: 0; border-radius: 10px; background: var(--accent); color: #fff;
@@ -239,6 +236,25 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .markdown th, .markdown td { padding: 6px 10px; border: 1px solid var(--border); text-align: left; }
 .markdown th { background: var(--surface); font-weight: 600; }
 .markdown code { padding: 1px 5px; border-radius: 5px; background: var(--surface-2); font-family: var(--mono); font-size: .88em; }
+/* 访问确认卡片 */
+.permission {
+  padding: 12px 14px; border: 1px solid #f0c36d; border-radius: 12px; background: #fffaf0;
+  box-shadow: 0 2px 10px rgba(183, 121, 31, .08);
+}
+.permission-head { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+.permission-head svg { width: 16px; height: 16px; flex: none; fill: none; stroke: #b7791f; stroke-width: 2; stroke-linecap: round; }
+.permission-head strong { flex: 1; }
+.countdown { font-size: 12px; color: #b7791f; font-variant-numeric: tabular-nums; }
+.permission-path {
+  display: block; margin: 8px 0 6px; padding: 6px 10px; border-radius: 8px; background: rgba(255, 255, 255, .8);
+  font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere;
+}
+.permission p { margin: 0; font-size: 12px; line-height: 1.6; color: var(--text-2); }
+.permission-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 10px; }
+.permission-note { margin: 0; font-size: 12px; color: var(--muted); }
+.permission-note code { font-family: var(--mono); font-size: 11px; }
+.permission-note.is-allow { color: var(--accent); }
+.permission-note.is-deny, .permission-note.is-timeout { color: #b7791f; }
 .cite-project { font-weight: 600; color: var(--hue); }
 .opened { display: flex; align-items: center; gap: 6px; margin: 0; font-size: 13px; color: var(--text-2); }
 .opened b { font-weight: 600; color: var(--text); }

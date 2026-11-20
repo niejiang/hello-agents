@@ -2,7 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
   HttpError, deleteEmpty, getJson, postEmpty, postJson, streamChat,
-  type ChatEvent, type ProjectProfile, type SessionProject,
+  type ChatEvent, type PermissionDecision, type ProjectProfile, type SessionProject,
 } from './api'
 import { projectHue, renderMarkdown } from './markdown'
 
@@ -17,6 +17,9 @@ type Part =
   | { kind: 'tools'; calls: ToolCall[] }
   | { kind: 'notice'; text: string }
   | { kind: 'project'; name: string; stack: string[]; path: string }
+  | PermissionPart
+// 模型推断出的路径需要用户确认；deadline 为毫秒时间戳，用于显示剩余时间。
+type PermissionPart = { kind: 'permission'; id: string; path: string; deadline: number; state: 'pending' | PermissionDecision; sending: boolean }
 type UserMessage = { role: 'user'; text: string }
 type AssistantMessage = {
   role: 'assistant'; parts: Part[]; state: 'streaming' | 'done' | 'stopped' | 'error'
@@ -55,7 +58,9 @@ const conversation = ref<HTMLElement | null>(null)
 const composer = ref<HTMLTextAreaElement | null>(null)
 
 const elapsed = computed(() => Math.max(0, Math.floor((now.value - startedAt.value) / 1000)))
-const status = computed(() => stopping.value ? '正在停止' : busy.value ? '回答中' : '就绪')
+const awaitingPermission = computed(() => messages.value.some(message =>
+  message.role === 'assistant' && message.parts.some(part => part.kind === 'permission' && part.state === 'pending')))
+const status = computed(() => stopping.value ? '正在停止' : awaitingPermission.value ? '等待确认' : busy.value ? '回答中' : '就绪')
 const openPaths = computed(() => new Set(sessionProjects.value.map(project => project.path)))
 const suggestions = computed<Suggestion[]>(() => {
   const recent = authorized.value[0]
@@ -198,6 +203,15 @@ function applyEvent(reply: AssistantMessage, event: ChatEvent) {
       if (call) Object.assign(call, { status: event.ok ? 'ok' : 'error', summary: event.summary, lines: event.lines, truncated: event.truncated })
       break
     }
+    case 'permission_request':
+      reply.parts.push({ kind: 'permission', id: event.id, path: event.path, deadline: Date.now() + event.timeout * 1000, state: 'pending', sending: false })
+      scrollToBottom()
+      break
+    case 'permission_resolved': {
+      const part = reply.parts.find((item): item is PermissionPart => item.kind === 'permission' && item.id === event.id)
+      if (part) part.state = event.decision
+      break
+    }
     case 'context_trimmed':
       reply.parts.push({ kind: 'notice', text: event.reason })
       break
@@ -265,6 +279,22 @@ async function send(preset?: string) {
     nextTick(resizeComposer)
     refreshProjects()
   }
+}
+
+// 对访问请求作出决定；结果以 permission_resolved 事件为准（请求可能已超时）。
+async function decide(part: PermissionPart, allow: boolean) {
+  if (part.sending || part.state !== 'pending') return
+  part.sending = true
+  try { await postEmpty(`/api/sessions/${session.value}/permissions/${part.id}`, { allow }) }
+  catch (e) { if (!(e instanceof HttpError && e.status === 404)) { part.sending = false; error.value = errorText(e, '提交失败，请重试') } }
+  focusComposer()
+}
+
+// now 每秒更新一次，向下取整避免显示超过总时长。
+const remaining = (part: PermissionPart) => Math.max(0, Math.floor((part.deadline - now.value) / 1000))
+const baseName = (path: string) => path.split('/').filter(Boolean).pop() ?? path
+const PERMISSION_NOTES: Record<PermissionDecision, string> = {
+  allow: '已允许访问', deny: '已拒绝访问', timeout: '确认超时，未访问', stopped: '已停止，未访问',
 }
 
 async function stop() {
@@ -338,7 +368,9 @@ function toolsTitle(calls: ToolCall[]) {
   const lookups = calls.filter(call => call.name !== 'open_project').length
   const failed = calls.filter(call => call.status === 'error').length
   const items = [opened.length ? `打开项目 ${opened.join('、')}` : '', lookups ? `查阅 ${lookups} 次` : '']
-  const title = items.filter(Boolean).join(' · ') || `执行了 ${calls.length} 次操作`
+  const title = items.filter(Boolean).join(' · ')
+  // 只有打开项目的调用且全部失败（如用户拒绝访问）时，直接说明未打开。
+  if (!title) return calls.length === failed ? '未打开项目' : `执行了 ${calls.length} 次操作`
   return failed ? `${title}，${failed} 次失败` : title
 }
 
@@ -475,6 +507,22 @@ onBeforeUnmount(() => { window.clearInterval(ticker); window.clearTimeout(stopTi
                       </li>
                     </ul>
                   </details>
+                  <section v-else-if="part.kind === 'permission' && part.state === 'pending'" class="permission" role="alertdialog" :aria-label="`是否允许访问 ${part.path}`">
+                    <div class="permission-head">
+                      <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2" /><path d="M8 11V8a4 4 0 0 1 8 0v3" /></svg>
+                      <strong>助手请求访问一个新目录</strong>
+                      <span class="countdown">{{ remaining(part) }}s</span>
+                    </div>
+                    <code class="permission-path">{{ part.path }}</code>
+                    <p>该路径不在你的消息中，也不在已授权项目中。允许后将以只读方式打开，并加入已授权项目。</p>
+                    <div class="permission-actions">
+                      <button class="ghost-button" :disabled="part.sending" @click="decide(part, false)">拒绝</button>
+                      <button class="primary-button" :disabled="part.sending" @click="decide(part, true)">允许访问</button>
+                    </div>
+                  </section>
+                  <p v-else-if="part.kind === 'permission'" :class="['permission-note', `is-${part.state}`]" :title="part.path">
+                    {{ PERMISSION_NOTES[part.state as PermissionDecision] }} <code>{{ baseName(part.path) }}</code>
+                  </p>
                   <p v-else-if="part.kind === 'project'" class="opened" :title="part.path">
                     <span :class="['project-dot', hue(part.name)]"></span>已打开项目 <b>{{ part.name }}</b>
                     <span class="opened-stack">{{ part.stack.join(' · ') || '未识别技术栈' }}</span>

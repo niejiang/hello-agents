@@ -110,12 +110,15 @@ class ProjectSet:
         self._open: OrderedDict[str, OpenProject] = OrderedDict()
         self._question = ""
         self._opened: list[ProjectProfile] = []
+        # 本轮用户拒绝访问的目录，同一轮内不再重复询问。
+        self._denied: set[Path] = set()
 
     # ---- 会话与状态 ----
 
     def begin_turn(self, question: str) -> None:
         """记录本轮用户原话，用于判断路径是否由用户明确给出。"""
         self._question = question
+        self._denied.clear()
 
     def projects(self) -> list[OpenProject]:
         """按最近使用从新到旧列出。"""
@@ -164,7 +167,9 @@ class ProjectSet:
             return self._open_path(target, explicit)
         return self._open_name(target)
 
-    def _open_path(self, raw: str, explicit: bool) -> OpenProject:
+    @staticmethod
+    def _checked_root(raw: str) -> Path:
+        """解析并校验目录：存在、是目录、不在禁止范围内。"""
         expanded = Path(raw).expanduser()
         if not expanded.is_absolute():
             raise ProjectAccessError("请使用绝对路径")
@@ -176,14 +181,45 @@ class ProjectSet:
             raise ProjectAccessError(f"不是目录：{raw}")
         if is_denied(root):
             raise ProjectAccessError("出于安全考虑，不能打开系统目录、主目录本身或凭据目录，请指定具体的项目目录")
+        return root
+
+    def permission_needed(self, target: str) -> Path | None:
+        """模型推断出的路径（不在用户原话中、未授权、未打开）需要用户确认时返回该目录，否则返回 None。
+
+        路径无效、被禁止或本轮已被拒绝时也返回 None，由 open 给出相应的错误。
+        """
+        target = target.strip()
+        if not target.startswith(("/", "~")):
+            return None
+        try:
+            root = self._checked_root(target)
+        except ProjectAccessError:
+            return None
+        if (root in self._denied or any(p.root == root for p in self._open.values())
+                or self.authorized.covering(root) is not None or user_specified(self._question, target, root)):
+            return None
+        return root
+
+    def grant(self, root: Path) -> None:
+        """用户在确认卡片上允许后，把目录加入已授权项目。"""
+        self.authorized.add(detect_profile(root))
+
+    def deny(self, root: Path) -> None:
+        """记录本轮被用户拒绝（或超时未确认）的目录。"""
+        self._denied.add(root)
+
+    def _open_path(self, raw: str, explicit: bool) -> OpenProject:
+        root = self._checked_root(raw)
         for project in self._open.values():
             if project.root == root:
                 return self._touch(project)
+        if root in self._denied:
+            raise ProjectAccessError("用户未允许访问该路径，请不要再次尝试；可以询问用户是否有其他项目路径")
         authorize = False
         if self.authorized.covering(root) is None:
             if not (explicit or user_specified(self._question, raw, root)):
                 raise ProjectAccessError(
-                    "该路径不在用户本轮消息中，也不属于已授权项目，不能打开；"
+                    "该路径不在用户本轮消息中，也不属于已授权项目，且未经用户确认，不能打开；"
                     "请向用户说明并请用户在消息中给出项目路径")
             authorize = True
         project = self._add(root)

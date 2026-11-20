@@ -41,7 +41,7 @@ class WebChatTests(unittest.TestCase):
         self.client = TestClient(app)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        patcher = patch('app.services.chat_service.create_chat_agent', side_effect=lambda projects: FakeAgent())
+        patcher = patch('app.services.chat_service.create_chat_agent', side_effect=lambda projects, permissions=None: FakeAgent())
         patcher.start()
         self.addCleanup(patcher.stop)
         # 测试不写入本机的已授权项目清单。
@@ -99,6 +99,16 @@ class WebChatTests(unittest.TestCase):
         self.assertEqual(self.client.get('/api/projects').json()['projects'], [])
         for session_id in (first['session_id'], second):
             self.assertEqual(self.client.get(f'/api/sessions/{session_id}/projects').json()['projects'], [])
+
+    def test_permission_endpoint(self):
+        session_id = self.create()['session_id']
+        session = store.get(session_id)
+        request_id = session.permissions.create('/x')
+        url = f'/api/sessions/{session_id}/permissions/{request_id}'
+        self.assertEqual(self.client.post(url, json={'allow': True}).status_code, 204)
+        self.assertEqual(session.permissions.wait(request_id, lambda: False), 'allow')
+        self.assertEqual(self.client.post(url, json={'allow': False}).status_code, 404)
+        self.assertEqual(self.client.post(f'/api/sessions/missing/permissions/{request_id}', json={'allow': True}).status_code, 404)
 
     def test_invalid_path(self):
         self.assertEqual(self.client.post('/api/sessions', json={'project_path': '/does/not/exist'}).status_code, 400)

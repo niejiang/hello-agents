@@ -39,7 +39,7 @@ class ChatServiceTests(unittest.TestCase):
         self.agent.run_stream.return_value = iter([{'type': 'text_delta', 'text': '回答'}, done('回答')])
         session = CodeChatSession(authorized=AuthorizedProjects(None))
         self.assertEqual(session.ask('  问题  '), '回答')
-        self.create_agent.assert_called_once_with(session.projects)
+        self.create_agent.assert_called_once_with(session.projects, session.permissions)
         self.agent.run_stream.assert_called_once_with(
             '问题', should_stop=ANY, max_tool_iterations=MAX_TOOL_ITERATIONS, max_tokens=MAX_ANSWER_TOKENS,
             extra_body={'enable_thinking': False},

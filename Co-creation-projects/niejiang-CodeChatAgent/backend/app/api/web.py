@@ -156,3 +156,14 @@ def add_session_project(session_id: str, body: ProjectPathRequest):
     except SessionBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
     return {'projects': session.project_list()}
+
+
+class PermissionDecision(BaseModel):
+    allow: bool
+
+
+@app.post('/api/sessions/{session_id}/permissions/{request_id}', status_code=204)
+def resolve_permission(session_id: str, request_id: str, body: PermissionDecision):
+    """对模型推断出的路径作出允许或拒绝；请求已超时、已处理或不存在时返回 404。"""
+    if not require_session(session_id).resolve_permission(request_id, body.allow):
+        raise HTTPException(status_code=404, detail='该确认请求已结束')

@@ -9,6 +9,7 @@ from typing import Any
 
 from app.agents.chat_agent import create_chat_agent
 from app.projects.authorized import AuthorizedProjects
+from app.projects.permissions import PermissionBroker
 from app.projects.project_set import ProjectAccessError, ProjectSet
 
 logger = logging.getLogger(__name__)
@@ -79,14 +80,16 @@ class CodeChatSession:
         for path in project_paths:
             self.projects.open(str(path), explicit=True)
         self.projects.drain_opened()
-        self.agent = create_chat_agent(self.projects)
+        self.permissions = PermissionBroker()
+        self.agent = create_chat_agent(self.projects, self.permissions)
         self._lock = threading.Lock()
         self._stop = threading.Event()
 
     def ask_stream(self, question: str, should_stop: Callable[[], bool] | None = None) -> Iterator[Event]:
         """开始回答并返回事件迭代器；会话忙时立即抛出 SessionBusyError。
 
-        事件依次为 start、若干 text_delta / tool_start / tool_end / project_opened / context_trimmed，
+        事件依次为 start、若干 text_delta / tool_start / permission_request / permission_resolved / tool_end /
+        project_opened / context_trimmed，
         最后是 done、stopped 或 error 之一。
         """
         question = question.strip()
@@ -146,6 +149,10 @@ class CodeChatSession:
             self.projects.drain_opened()
         finally:
             self._lock.release()
+
+    def resolve_permission(self, request_id: str, allow: bool) -> bool:
+        """记录用户对访问确认的决定；请求不存在或已结束时返回 False。回答进行中也可调用。"""
+        return self.permissions.resolve(request_id, allow)
 
     def stop(self) -> None:
         """请求停止当前回答；Agent 在收到下一段模型输出或执行下一个工具前结束，并产出 stopped 事件。"""
