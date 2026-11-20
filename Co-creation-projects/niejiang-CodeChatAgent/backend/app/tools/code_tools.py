@@ -165,7 +165,7 @@ class CodeWorkspace:
 
 
 class CodeTool(Tool):
-    """将工作区操作适配为 Hello-Agents 工具。"""
+    """将工作区操作适配为 Hello-Agents 工具，并提供严格的 JSON Schema。"""
 
     def __init__(
         self,
@@ -173,27 +173,41 @@ class CodeTool(Tool):
         description: str,
         parameters: list[ToolParameter],
         operation: Callable[..., str],
+        constraints: dict[str, dict[str, Any]] | None = None,
     ) -> None:
-        """保存工具的参数定义和对应的工作区操作。"""
+        """保存参数定义、额外的 Schema 约束和对应的工作区操作。"""
         super().__init__(name, description)
         self.parameters = parameters
         self.operation = operation
+        self.constraints = constraints or {}
 
     def get_parameters(self) -> list[ToolParameter]:
         """供 Hello-Agents 获取工具的参数定义。"""
         return self.parameters
 
+    def parameters_schema(self) -> dict[str, Any]:
+        """生成原生工具调用使用的参数 Schema，禁止未声明的参数。"""
+        properties: dict[str, Any] = {}
+        for parameter in self.parameters:
+            schema: dict[str, Any] = {"type": parameter.type, "description": parameter.description}
+            if parameter.default is not None:
+                schema["default"] = parameter.default
+            schema.update(self.constraints.get(parameter.name, {}))
+            properties[parameter.name] = schema
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": [parameter.name for parameter in self.parameters if parameter.required],
+            "additionalProperties": False,
+        }
+
     def run(self, parameters: dict[str, Any]) -> str:
-        """执行工具并将常见参数或文件错误转换成可读结果。"""
+        """执行工具并将参数或文件错误转换成模型可读的结果。"""
         print(f"\n[工具] {self.name}：{parameters}", flush=True)
-        # SimpleAgent 对简写调用可能使用 input，转换为工具实际参数名。
-        if "input" in parameters and len(parameters) == 1:
-            key = "query" if self.name == "search_code" else "path"
-            parameters = {key: parameters["input"]}
         try:
             return self.operation(**parameters)
         except (ValueError, TypeError, OSError, UnicodeError) as exc:
-            return f"工具执行失败：{exc}"
+            return f"工具执行失败：{exc}。请检查参数后重试。"
 
 
 def create_code_registry(root: Path) -> ToolRegistry:
@@ -203,40 +217,49 @@ def create_code_registry(root: Path) -> ToolRegistry:
     registry.register_tool(
         CodeTool(
             name="list_files",
-            description="列出目录中的文件。path 为项目内相对路径，根目录用 .",
+            description="列出项目内某个目录的直接子项，目录以 / 结尾。用于了解项目结构。",
             parameters=[
                 ToolParameter(
-                    name="path", type="string", description="相对目录路径",
+                    name="path", type="string", description="项目内的相对目录路径，根目录用 .",
                     required=False, default=".",
                 )
             ],
             operation=workspace.list_files,
+            constraints={"path": {"maxLength": 1024}},
         )
     )
     registry.register_tool(
         CodeTool(
             name="search_code",
-            description="按字面文本搜索项目代码，返回文件和行号。",
-            parameters=[ToolParameter(name="query", type="string", description="搜索关键词")],
+            description=(
+                "按字面文本不区分大小写地搜索项目文件内容，返回“相对路径:行号: 该行内容”，最多 50 条。"
+                "用于定位函数、类、配置项的定义和调用处；不支持正则表达式。"
+            ),
+            parameters=[ToolParameter(name="query", type="string", description="要搜索的字面文本，可包含括号、逗号等符号")],
             operation=workspace.search,
+            constraints={"query": {"minLength": 1, "maxLength": 200}},
         )
     )
     registry.register_tool(
         CodeTool(
             name="read_file",
-            description="读取项目文件的行范围，返回行号；每次最多 200 行。",
+            description=(
+                "读取项目内 UTF-8 文本文件的指定行范围（包含首尾行），返回带行号的内容，每次最多 200 行。"
+                "通常先用 search_code 找到行号，再读取附近代码。"
+            ),
             parameters=[
-                ToolParameter(name="path", type="string", description="文件相对路径"),
+                ToolParameter(name="path", type="string", description="项目内的文件相对路径"),
                 ToolParameter(
-                    name="start", type="integer", description="起始行，默认 1",
+                    name="start", type="integer", description="起始行号，从 1 开始",
                     required=False, default=1,
                 ),
                 ToolParameter(
-                    name="end", type="integer", description="结束行，默认 100",
+                    name="end", type="integer", description="结束行号，与起始行相差不超过 199",
                     required=False, default=100,
                 ),
             ],
             operation=workspace.read_file,
+            constraints={"path": {"minLength": 1, "maxLength": 1024}, "start": {"minimum": 1}, "end": {"minimum": 1}},
         )
     )
     return registry
