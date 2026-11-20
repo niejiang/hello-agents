@@ -7,10 +7,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from app.agents.chat_agent import create_chat_agent
+from app.agents.chat_agent import Turn, create_chat_agent
 from app.projects.authorized import AuthorizedProjects
 from app.projects.permissions import PermissionBroker
 from app.projects.project_set import ProjectAccessError, ProjectSet
+from app.storage.chat_store import ChatStore, StoredTurn
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +21,11 @@ MAX_ANSWER_TOKENS = 4096
 AUTHORIZED_PROJECTS_FILE = Path(__file__).resolve().parents[3] / "data" / "authorized_projects.json"
 # 命令行和网页的所有会话共用同一份清单。
 authorized_store = AuthorizedProjects(AUTHORIZED_PROJECTS_FILE)
+# 网页对话保存在本机 SQLite 中（同样位于 data/，不提交到仓库）；命令行对话不保存。
+CHAT_DB_FILE = Path(__file__).resolve().parents[3] / "data" / "chat.db"
+chat_store = ChatStore(CHAT_DB_FILE)
+# 结束一轮回答的事件；保存时若缺少（如客户端断开），补一个 stopped。
+TERMINAL_EVENTS = {"done", "stopped", "error"}
 
 Event = dict[str, Any]
 
@@ -73,9 +79,15 @@ class CodeChatSession:
     """一个会话对应一个 Agent 和一组按需打开的项目；同一会话同时只处理一条消息，以保护对话历史。"""
 
     def __init__(self, project_paths: Sequence[Path] = (), options: ChatOptions | None = None,
-                 authorized: AuthorizedProjects | None = None) -> None:
-        """project_paths 为用户预先指定的项目（如命令行 --project），直接打开并加入已授权项目。"""
+                 authorized: AuthorizedProjects | None = None, *, conversation_id: str | None = None,
+                 store: ChatStore | None = None) -> None:
+        """project_paths 为用户预先指定的项目（如命令行 --project），直接打开并加入已授权项目。
+
+        提供 store 和 conversation_id 时，每轮问答结束后保存到该对话。
+        """
         self.options = options or ChatOptions()
+        self.conversation_id = conversation_id
+        self.store = store if conversation_id else None
         self.projects = ProjectSet(authorized if authorized is not None else authorized_store)
         for path in project_paths:
             self.projects.open(str(path), explicit=True)
@@ -84,6 +96,21 @@ class CodeChatSession:
         self.agent = create_chat_agent(self.projects, self.permissions)
         self._lock = threading.Lock()
         self._stop = threading.Event()
+
+    @classmethod
+    def restore(cls, conversation_id: str, store: ChatStore, authorized: AuthorizedProjects | None = None,
+                options: ChatOptions | None = None) -> "CodeChatSession":
+        """恢复已保存的对话：重新打开仍在授权清单中的项目，并恢复模型上下文。"""
+        session = cls(options=options, authorized=authorized, conversation_id=conversation_id, store=store)
+        # 从最久未使用的开始打开，使最近使用的项目恢复后仍排在最前。
+        for path in reversed(store.project_paths(conversation_id)):
+            try:
+                session.projects.open(path)
+            except ProjectAccessError:
+                logger.info("恢复对话时跳过未授权或不可用的项目：%s", path)
+        session.projects.drain_opened()
+        session.agent.restore_turns([Turn(t.question, t.answer, t.tool_summary) for t in store.turns(conversation_id)])
+        return session
 
     def ask_stream(self, question: str, should_stop: Callable[[], bool] | None = None) -> Iterator[Event]:
         """开始回答并返回事件迭代器；会话忙时立即抛出 SessionBusyError。
@@ -116,20 +143,47 @@ class CodeChatSession:
         def stop_requested() -> bool:
             return self._stop.is_set() or bool(should_stop and should_stop())
 
+        produced: list[Event] = []
+        answered = False
+
+        def emit(event: Event) -> Event:
+            produced.append(event)
+            return event
+
         try:
             yield {"type": "start"}
             try:
                 for event in self.agent.run_stream(question, should_stop=stop_requested, **self.options.run_kwargs()):
                     if event["type"] == "done" and not event.get("answer", "").strip():
-                        yield {"type": "error", "code": "empty_answer",
-                               "message": "模型未返回有效回答，请检查模型配置和服务状态"}
+                        yield emit({"type": "error", "code": "empty_answer",
+                                    "message": "模型未返回有效回答，请检查模型配置和服务状态"})
                         return
-                    yield event
+                    answered = answered or event["type"] == "done"
+                    yield emit(event)
             except Exception:
                 logger.exception("对话请求失败")
-                yield {"type": "error", "code": "model_error", "message": "模型请求失败，请稍后重试"}
+                yield emit({"type": "error", "code": "model_error", "message": "模型请求失败，请稍后重试"})
         finally:
-            self._lock.release()
+            try:
+                self._save(question, produced, answered)
+            finally:
+                self._lock.release()
+
+    def _save(self, question: str, events: list[Event], answered: bool) -> None:
+        """保存本轮问答。没有任何内容就出错时不保存（前端会撤回这次提问）。"""
+        if self.store is None or not any(event["type"] != "error" for event in events):
+            return
+        if events[-1]["type"] not in TERMINAL_EVENTS:
+            events = [*events, {"type": "stopped"}]
+        last = self.agent.turns[-1] if answered and self.agent.turns else None
+        turn = StoredTurn(last.question, last.answer, last.tool_summary) if last else None
+        try:
+            self.store.save_exchange(self.conversation_id, question, events, turn, self._project_paths())
+        except Exception:
+            logger.exception("保存对话失败")
+
+    def _project_paths(self) -> list[str]:
+        return [str(project.root) for project in self.projects.projects()]
 
     def project_list(self) -> list[dict[str, Any]]:
         """当前会话已打开的项目，从最近使用开始；已撤销授权的项目不再列出。"""
@@ -147,6 +201,9 @@ class CodeChatSession:
                 raise ProjectAccessError("只能加入已授权项目；新项目请在对话中写出路径")
             self.projects.open(str(root))
             self.projects.drain_opened()
+            if self.store is not None:
+                self.store.create(self.conversation_id)
+                self.store.save_projects(self.conversation_id, self._project_paths())
         finally:
             self._lock.release()
 
@@ -167,3 +224,15 @@ class CodeChatSession:
             if event["type"] == "done":
                 return event["answer"]
         raise ChatError("回答被中断")
+
+
+def new_session(project_paths: Sequence[Path], conversation_id: str) -> CodeChatSession:
+    """网页新建对话：保存到本机对话库。"""
+    return CodeChatSession(project_paths, conversation_id=conversation_id, store=chat_store)
+
+
+def restore_session(conversation_id: str) -> CodeChatSession | None:
+    """从本机对话库恢复对话；不存在时返回 None。"""
+    if not chat_store.exists(conversation_id):
+        return None
+    return CodeChatSession.restore(conversation_id, chat_store)

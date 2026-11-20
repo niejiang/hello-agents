@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import {
-  HttpError, deleteEmpty, getJson, postEmpty, postJson, streamChat,
-  type ChatEvent, type PermissionDecision, type ProjectProfile, type SessionProject,
+  HttpError, deleteEmpty, getJson, patchEmpty, postEmpty, postJson, streamChat,
+  type ChatEvent, type Conversation, type PermissionDecision, type ProjectProfile, type SessionProject,
+  type StoredMessage,
 } from './api'
 import { projectHue, renderMarkdown } from './markdown'
 
@@ -33,12 +34,21 @@ const isMac = /mac/i.test((navigator as Navigator & { userAgentData?: { platform
 const newlineKeys = isMac ? ['⌥ Option', 'Enter'] : ['Shift', 'Enter']
 // 停止请求发出后仍未结束（例如模型迟迟没有输出）时，直接断开连接。
 const STOP_TIMEOUT_MS = 5000
+// 记住当前对话，刷新页面后恢复。浏览器存储不可用（如隐私模式）时忽略。
+const SESSION_KEY = 'codechat.session'
+const remember = (id: string) => { try { id ? localStorage.setItem(SESSION_KEY, id) : localStorage.removeItem(SESSION_KEY) } catch { /* 忽略 */ } }
+const remembered = () => { try { return localStorage.getItem(SESSION_KEY) ?? '' } catch { return '' } }
 
 // 会话在发送第一条消息时创建；项目在对话中按需打开。
 const session = ref('')
 const sessionProjects = ref<SessionProject[]>([])
 const authorized = ref<ProjectProfile[]>([])
 const confirmingRevoke = ref('')
+const conversations = ref<Conversation[]>([])
+const confirmingDelete = ref('')
+const renaming = ref('')
+const renameText = ref('')
+const loadingConversation = ref(false)
 const sidebarError = ref('')
 const sidebarOpen = ref(false)
 const input = ref('')
@@ -70,6 +80,22 @@ const suggestions = computed<Suggestion[]>(() => {
   return [...general, { text: '分析一个本地项目：~/', send: false }]
 })
 const hue = (name: string) => `hue-${projectHue(name)}`
+const currentTitle = computed(() => conversations.value.find(item => item.id === session.value)?.title || (messages.value.length ? '对话' : '新对话'))
+// 历史对话按“今天 / 昨天 / 近 7 天 / 更早”分组。
+const conversationGroups = computed(() => {
+  const startOfToday = new Date(); startOfToday.setHours(0, 0, 0, 0)
+  const day = 24 * 3600 * 1000
+  const groups: { label: string; items: Conversation[] }[] = []
+  for (const item of conversations.value) {
+    const time = new Date(item.updated_at).getTime()
+    const label = time >= startOfToday.getTime() ? '今天' : time >= startOfToday.getTime() - day ? '昨天'
+      : time >= startOfToday.getTime() - 6 * day ? '近 7 天' : '更早'
+    const group = groups[groups.length - 1]
+    if (group?.label === label) group.items.push(item)
+    else groups.push({ label, items: [item] })
+  }
+  return groups
+})
 const errorText = (e: unknown, fallback: string) => e instanceof Error ? e.message : fallback
 
 function focusComposer() {
@@ -88,23 +114,109 @@ async function refreshProjects() {
   } catch { /* 忽略 */ }
 }
 
+async function refreshConversations() {
+  try { conversations.value = (await getJson('/api/conversations')).conversations } catch { /* 忽略 */ }
+}
+
 async function ensureSession() {
-  if (!session.value) session.value = (await postJson('/api/sessions')).session_id
+  if (!session.value) {
+    session.value = (await postJson('/api/sessions')).session_id
+    remember(session.value)
+  }
   return session.value
 }
 
 function resetSession() {
   session.value = ''
   sessionProjects.value = []
+  remember('')
 }
 
+// 新对话：旧对话已保存，可在历史中找回。
 function newChat() {
   if (busy.value) return
-  // 释放旧会话，失败不影响新对话。
-  if (session.value) deleteEmpty(`/api/sessions/${session.value}`).catch(() => {})
   resetSession()
   messages.value = []; error.value = ''; sidebarOpen.value = false
   focusComposer()
+}
+
+// 用保存的事件重放出助手消息，展示与实时回答一致。
+function replay(stored: StoredMessage[]): Message[] {
+  return stored.map(item => {
+    if (item.role === 'user') return { role: 'user', text: item.text }
+    const reply: AssistantMessage = { role: 'assistant', parts: [], state: 'streaming' }
+    try {
+      for (const event of item.events) applyEvent(reply, event, false)
+    } catch (e) { reply.state = 'error'; reply.error = errorText(e, '回答失败') }
+    if (reply.state === 'streaming') reply.state = 'stopped'
+    for (const part of reply.parts) if (part.kind === 'text') part.html = renderMarkdown(part.text)
+    return reply
+  })
+}
+
+async function openConversation(id: string) {
+  if (busy.value || loadingConversation.value) return
+  loadingConversation.value = true; error.value = ''
+  try {
+    const data = await getJson(`/api/sessions/${id}/messages`)
+    session.value = id; remember(id)
+    messages.value = replay(data.messages)
+    sessionProjects.value = data.projects
+    sidebarOpen.value = false
+    scrollToBottom(true)
+    focusComposer()
+  } catch (e) {
+    if (e instanceof HttpError && e.status === 404) {
+      // 对话已被删除：清除记忆并刷新列表。
+      if (remembered() === id) remember('')
+      await refreshConversations()
+    } else error.value = errorText(e, '无法打开对话')
+  } finally { loadingConversation.value = false }
+}
+
+// 第一次点击进入确认状态，再次点击才删除。
+async function removeConversation(item: Conversation) {
+  if (confirmingDelete.value !== item.id) { confirmingDelete.value = item.id; return }
+  confirmingDelete.value = ''
+  try {
+    await deleteEmpty(`/api/sessions/${item.id}`)
+    if (item.id === session.value) { resetSession(); messages.value = [] }
+    await refreshConversations()
+  } catch (e) { sidebarError.value = errorText(e, '删除失败') }
+}
+
+function startRename(item: Conversation) {
+  renaming.value = item.id
+  renameText.value = item.title
+  nextTick(() => {
+    const el = document.querySelector<HTMLInputElement>('.conversation-rename')
+    el?.focus(); el?.select()
+  })
+}
+
+async function finishRename(item: Conversation, save: boolean) {
+  if (renaming.value !== item.id) return
+  renaming.value = ''
+  const title = renameText.value.trim()
+  if (!save || !title || title === item.title) return
+  item.title = title
+  try { await patchEmpty(`/api/sessions/${item.id}`, { title }) } catch (e) { sidebarError.value = errorText(e, '重命名失败') }
+  await refreshConversations()
+}
+
+function onRenameKeydown(event: KeyboardEvent, item: Conversation) {
+  if (isComposing(event)) return
+  if (event.key === 'Enter') { event.preventDefault(); finishRename(item, true) }
+  if (event.key === 'Escape') { event.preventDefault(); finishRename(item, false) }
+}
+
+function formatTime(value: string) {
+  const date = new Date(value)
+  const today = new Date()
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return date.toDateString() === today.toDateString()
+    ? `${pad(date.getHours())}:${pad(date.getMinutes())}`
+    : `${date.getMonth() + 1}-${date.getDate()}`
 }
 
 // 把已授权项目加入当前对话，不产生新的授权。
@@ -183,7 +295,8 @@ function formatMeta(event: Extract<ChatEvent, { type: 'done' }>) {
 
 class StreamError extends Error {}
 
-function applyEvent(reply: AssistantMessage, event: ChatEvent) {
+// live 为 false 时为重放历史，不触发界面上的额外请求。
+function applyEvent(reply: AssistantMessage, event: ChatEvent, live = true) {
   const last = lastPart(reply)
   switch (event.type) {
     case 'text_delta':
@@ -222,7 +335,7 @@ function applyEvent(reply: AssistantMessage, event: ChatEvent) {
         .reverse().find(item => item.name === 'open_project' && !item.opened)
       if (call) call.opened = opened
       else reply.parts.push({ kind: 'project', ...opened })
-      refreshProjects()
+      if (live) refreshProjects()
       break
     }
     case 'done':
@@ -278,6 +391,7 @@ async function send(preset?: string) {
     focusComposer()
     nextTick(resizeComposer)
     refreshProjects()
+    refreshConversations()
   }
 }
 
@@ -400,7 +514,12 @@ function copyMessage(event: MouseEvent, message: AssistantMessage) {
   copyText(event.currentTarget as HTMLElement, text)
 }
 
-onMounted(refreshProjects)
+onMounted(() => {
+  refreshProjects()
+  refreshConversations()
+  const id = remembered()
+  if (id) openConversation(id)
+})
 onBeforeUnmount(() => { window.clearInterval(ticker); window.clearTimeout(stopTimer); controller?.abort() })
 </script>
 
@@ -417,23 +536,41 @@ onBeforeUnmount(() => { window.clearInterval(ticker); window.clearTimeout(stopTi
         <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14" /></svg>新对话
       </button>
 
-      <section class="panel">
-        <div class="panel-title">当前对话的项目</div>
-        <ul v-if="sessionProjects.length" class="project-list">
-          <li v-for="item in sessionProjects" :key="item.path" class="project-row" :title="item.path">
-            <span :class="['project-dot', hue(item.alias)]"></span>
-            <div class="project-meta">
-              <strong>{{ item.alias }}</strong>
-              <small>{{ item.stack.join(' · ') || '未识别技术栈' }}</small>
+      <section class="panel grow history">
+        <div class="panel-title">历史对话</div>
+        <div v-if="conversations.length" class="history-list">
+          <template v-for="group in conversationGroups" :key="group.label">
+            <div class="history-group">{{ group.label }}</div>
+            <div
+              v-for="item in group.items" :key="item.id"
+              :class="['history-row', { active: item.id === session, confirm: confirmingDelete === item.id }]"
+            >
+              <input
+                v-if="renaming === item.id" v-model="renameText" class="conversation-rename" maxlength="100" aria-label="对话标题"
+                @keydown="onRenameKeydown($event, item)" @blur="finishRename(item, true)"
+              >
+              <button
+                v-else class="history-open" :disabled="busy" :title="item.title" @click="openConversation(item.id)"
+                @dblclick="startRename(item)"
+              >
+                <span class="history-title">{{ item.title || '未命名对话' }}</span>
+                <span class="history-time">{{ formatTime(item.updated_at) }}</span>
+              </button>
+              <div v-if="renaming !== item.id" class="history-actions">
+                <button class="history-action" :aria-label="`重命名 ${item.title}`" title="重命名" @click="startRename(item)">✎</button>
+                <button
+                  :class="['history-action', 'danger', { confirm: confirmingDelete === item.id }]" :aria-label="`删除 ${item.title}`"
+                  title="删除" @click="removeConversation(item)" @blur="confirmingDelete = ''"
+                >{{ confirmingDelete === item.id ? '删除' : '✕' }}</button>
+              </div>
             </div>
-            <span v-if="item.recent && sessionProjects.length > 1" class="tag">最近</span>
-          </li>
-        </ul>
-        <p v-else class="panel-note">尚未打开项目。在消息中写出项目路径即可，如 <code>~/Projects/my-app</code>。</p>
+          </template>
+        </div>
+        <p v-else class="panel-note">对话会自动保存在本机，之后可以在这里找回。</p>
       </section>
 
-      <section class="panel grow">
-        <div class="panel-title">已授权项目<span v-if="authorized.length" class="count">{{ authorized.length }}</span></div>
+      <details class="panel projects-panel" open>
+        <summary class="panel-title">已授权项目<span v-if="authorized.length" class="count">{{ authorized.length }}</span></summary>
         <ul v-if="authorized.length" class="project-list">
           <li v-for="item in authorized" :key="item.path" class="project-row action">
             <button
@@ -450,11 +587,11 @@ onBeforeUnmount(() => { window.clearInterval(ticker); window.clearTimeout(stopTi
             >{{ confirmingRevoke === item.path ? '撤销授权' : '✕' }}</button>
           </li>
         </ul>
-        <p v-else class="panel-note">打开过的项目会出现在这里，之后直接说项目名称即可。</p>
-        <p v-if="sidebarError" class="error" role="alert">{{ sidebarError }}</p>
-      </section>
+        <p v-else class="panel-note">在消息中写出项目路径即可打开，如 <code>~/Projects/my-app</code>；打开过的项目会出现在这里。</p>
+      </details>
+      <p v-if="sidebarError" class="error" role="alert">{{ sidebarError }}</p>
 
-      <p class="sidebar-foot">已授权项目中被读取的代码片段会发送给配置的模型服务。对话仅保留在服务运行期间。</p>
+      <p class="sidebar-foot">已授权项目中被读取的代码片段会发送给配置的模型服务。对话保存在本机 data/chat.db。</p>
     </aside>
     <div v-if="sidebarOpen" class="scrim only-mobile" @click="sidebarOpen = false"></div>
 
@@ -462,7 +599,7 @@ onBeforeUnmount(() => { window.clearInterval(ticker); window.clearTimeout(stopTi
       <header class="topbar">
         <button class="icon-button only-mobile" aria-label="打开侧栏" @click="sidebarOpen = true">☰</button>
         <div class="topbar-title">
-          <strong>{{ messages.length ? '对话' : '新对话' }}</strong>
+          <strong class="topbar-name" :title="currentTitle">{{ currentTitle }}</strong>
           <span v-for="item in sessionProjects.slice(0, 3)" :key="item.path" :class="['chip', hue(item.alias)]" :title="item.path">{{ item.alias }}</span>
           <span v-if="sessionProjects.length > 3" class="chip more">+{{ sessionProjects.length - 3 }}</span>
         </div>

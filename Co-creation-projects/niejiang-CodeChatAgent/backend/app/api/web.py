@@ -69,8 +69,32 @@ def create_session(body: CreateSessionRequest | None = None):
 
 @app.delete('/api/sessions/{session_id}', status_code=204)
 def delete_session(session_id: str):
-    """前端切换项目时释放旧会话；会话不存在时同样视为成功。"""
+    """永久删除对话（内存中的会话和对话库中的记录）；不存在时同样视为成功。"""
     store.delete(session_id)
+    chat_service.chat_store.delete(session_id)
+
+
+class RenameRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=100)
+
+    @field_validator('title')
+    @classmethod
+    def nonblank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError('标题不能为空')
+        return value.strip()
+
+
+@app.patch('/api/sessions/{session_id}', status_code=204)
+def rename_session(session_id: str, body: RenameRequest):
+    if not chat_service.chat_store.rename(session_id, body.title):
+        raise HTTPException(status_code=404, detail='对话不存在')
+
+
+@app.get('/api/conversations')
+def list_conversations():
+    """已保存的对话（有消息的），按最近更新排序。"""
+    return {'conversations': chat_service.chat_store.list()}
 
 
 def require_session(session_id: str):
@@ -167,3 +191,16 @@ def resolve_permission(session_id: str, request_id: str, body: PermissionDecisio
     """对模型推断出的路径作出允许或拒绝；请求已超时、已处理或不存在时返回 404。"""
     if not require_session(session_id).resolve_permission(request_id, body.allow):
         raise HTTPException(status_code=404, detail='该确认请求已结束')
+
+
+@app.get('/api/sessions/{session_id}/messages')
+def session_messages(session_id: str):
+    """恢复对话用：标题、展示用消息（助手消息为事件列表，由前端重放）和当前打开的项目。"""
+    session = require_session(session_id)
+    info = chat_service.chat_store.get(session_id) or {}
+    return {
+        'id': session_id,
+        'title': info.get('title', ''),
+        'messages': chat_service.chat_store.messages(session_id),
+        'projects': session.project_list(),
+    }

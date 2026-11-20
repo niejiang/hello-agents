@@ -16,6 +16,8 @@ export type ChatEvent =
 export type PermissionDecision = 'allow' | 'deny' | 'timeout' | 'stopped'
 export type ProjectProfile = { name: string; path: string; stack: string[]; title: string; summary: string; top_directories: string[] }
 export type SessionProject = ProjectProfile & { alias: string; recent: boolean }
+export type Conversation = { id: string; title: string; created_at: string; updated_at: string; message_count: number }
+export type StoredMessage = { role: 'user'; text: string } | { role: 'assistant'; events: ChatEvent[] }
 
 /** 带 HTTP 状态码的请求错误，便于区分会话失效（404）、会话忙（409）等情况。 */
 export class HttpError extends Error {
@@ -56,6 +58,7 @@ export const getJson = async (url: string) => json(await call('GET', url))
 export const postJson = async (url: string, body?: object) => json(await call('POST', url, body))
 export const postEmpty = async (url: string, body?: object) => { await call('POST', url, body) }
 export const deleteEmpty = async (url: string) => { await call('DELETE', url) }
+export const patchEmpty = async (url: string, body: object) => { await call('PATCH', url, body) }
 
 /** 发送问题并逐条产出 SSE 事件；signal 中止时抛出 AbortError。 */
 export async function* streamChat(url: string, body: object, signal: AbortSignal): AsyncGenerator<ChatEvent> {

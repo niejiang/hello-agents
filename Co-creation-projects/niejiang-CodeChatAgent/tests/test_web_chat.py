@@ -10,15 +10,25 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 from fastapi.testclient import TestClient
 from app.api.web import app, store
 from app.projects.authorized import AuthorizedProjects
+from app.storage.chat_store import ChatStore
+from app.agents.chat_agent import Turn
 
 
 class FakeAgent:
+    """模拟 Agent：回答为历史问题的拼接，并像真实 Agent 一样记录 turns，便于验证恢复。"""
+
     def __init__(self):
         self.history = []
+        self.turns = []
+
+    def restore_turns(self, turns):
+        self.turns = list(turns)
+        self.history = [turn.question for turn in turns]
 
     def run_stream(self, question, **kwargs):
         self.history.append(question)
         answer = '|'.join(self.history)
+        self.turns.append(Turn(question, answer, ''))
         yield {'type': 'tool_start', 'id': 'c1', 'name': 'list_files', 'arguments': {}}
         yield {'type': 'tool_end', 'id': 'c1', 'name': 'list_files', 'ok': True, 'summary': 'a.py', 'lines': 1,
                'chars': 4, 'truncated': False}
@@ -48,6 +58,10 @@ class WebChatTests(unittest.TestCase):
         authorized = patch('app.services.chat_service.authorized_store', AuthorizedProjects(None))
         authorized.start()
         self.addCleanup(authorized.stop)
+        # 测试使用临时对话库，不写入本机 data/chat.db。
+        chats = patch('app.services.chat_service.chat_store', ChatStore(Path(self.temp.name) / 'chat.db'))
+        chats.start()
+        self.addCleanup(chats.stop)
 
     def create(self):
         return self.client.post('/api/sessions', json={'project_path': self.temp.name}).json()
@@ -109,6 +123,57 @@ class WebChatTests(unittest.TestCase):
         self.assertEqual(session.permissions.wait(request_id, lambda: False), 'allow')
         self.assertEqual(self.client.post(url, json={'allow': False}).status_code, 404)
         self.assertEqual(self.client.post(f'/api/sessions/missing/permissions/{request_id}', json={'allow': True}).status_code, 404)
+
+    def stream(self, session_id, text):
+        return parse_sse(self.client.post(f'/api/sessions/{session_id}/messages/stream', json={'message': text}).text)
+
+    def test_conversations_persist_and_restore(self):
+        session_id = self.client.post('/api/sessions').json()['session_id']
+        self.assertEqual(self.client.get('/api/conversations').json()['conversations'], [])
+        self.stream(session_id, '第一问')
+        self.send(session_id, '第二问')
+        listed = self.client.get('/api/conversations').json()['conversations']
+        self.assertEqual([(c['id'], c['title'], c['message_count']) for c in listed], [(session_id, '第一问', 4)])
+
+        store.clear()  # 模拟服务重启：内存中的会话全部丢失
+        restored = self.client.get(f'/api/sessions/{session_id}/messages').json()
+        self.assertEqual(restored['title'], '第一问')
+        self.assertEqual([m['role'] for m in restored['messages']], ['user', 'assistant', 'user', 'assistant'])
+        events = restored['messages'][1]['events']
+        self.assertEqual([e['type'] for e in events], ['tool_start', 'tool_end', 'text_delta', 'done'])
+        # 模型上下文同样恢复：回答包含之前的问题。
+        self.assertEqual(self.send(session_id, '第三问').json()['content'][0]['text'], '第一问|第二问|第三问')
+
+        self.assertEqual(self.client.patch(f'/api/sessions/{session_id}', json={'title': '改名'}).status_code, 204)
+        self.assertEqual(self.client.get('/api/conversations').json()['conversations'][0]['title'], '改名')
+        self.assertEqual(self.client.patch('/api/sessions/missing', json={'title': 'x'}).status_code, 404)
+        self.assertEqual(self.client.patch(f'/api/sessions/{session_id}', json={'title': '  '}).status_code, 422)
+
+        self.assertEqual(self.client.delete(f'/api/sessions/{session_id}').status_code, 204)
+        self.assertEqual(self.client.get('/api/conversations').json()['conversations'], [])
+        store.clear()
+        self.assertEqual(self.client.get(f'/api/sessions/{session_id}/messages').status_code, 404)
+
+    def test_failed_first_answer_is_not_saved(self):
+        session_id = self.client.post('/api/sessions').json()['session_id']
+        empty = lambda self, question, **kwargs: iter([{'type': 'done', 'answer': '  ', 'usage': {}, 'context': {}}])
+        with patch.object(FakeAgent, 'run_stream', empty):
+            self.assertEqual([name for name, _ in self.stream(session_id, '问')], ['start', 'error'])
+        self.assertEqual(self.client.get('/api/conversations').json()['conversations'], [])
+
+    def test_restore_reopens_only_authorized_projects(self):
+        with tempfile.TemporaryDirectory() as other:
+            first = self.create()
+            second = self.client.post('/api/sessions', json={'project_path': other}).json()
+            for item in (first, second):
+                self.stream(item['session_id'], '看看')
+            self.assertEqual(self.client.post('/api/projects/revoke', json={'path': second['project_path']}).status_code, 204)
+            store.clear()
+            restored = self.client.get(f"/api/sessions/{first['session_id']}/messages").json()
+            self.assertEqual([p['path'] for p in restored['projects']], [first['project_path']])
+            revoked = self.client.get(f"/api/sessions/{second['session_id']}/messages").json()
+            self.assertEqual(revoked['projects'], [])
+            self.assertEqual(len(revoked['messages']), 2)
 
     def test_invalid_path(self):
         self.assertEqual(self.client.post('/api/sessions', json={'project_path': '/does/not/exist'}).status_code, 400)

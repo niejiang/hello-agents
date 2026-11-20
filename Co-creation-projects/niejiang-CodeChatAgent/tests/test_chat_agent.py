@@ -202,6 +202,16 @@ class ChatAgentTests(unittest.TestCase):
         self.assertNotIn("第一问", contents)
         self.assertIn("第二问", contents)
 
+    def test_restore_turns_applies_history_limit(self):
+        from app.agents.chat_agent import Turn
+        self.agent.context = ContextBudget(budget=200, max_input=991808)
+        turns = [Turn(f"问{i}", "很长的回答" * 30, "") for i in range(3)]
+        self.agent.restore_turns(turns)
+        self.assertEqual([t.question for t in self.agent.turns], ["问2"])
+        self.agent.context = ContextBudget(budget=128000, max_input=991808)
+        self.agent.restore_turns(turns)
+        self.assertEqual(len(self.agent.turns), 3)
+
     def test_usage_is_reported_and_calibrates_estimate(self):
         """M0：读取接口返回的用量，校准字符与 Token 的换算比例。"""
         completions = self.use([chunk("你好"), usage_chunk(500, completion_tokens=7, cached_tokens=120)])

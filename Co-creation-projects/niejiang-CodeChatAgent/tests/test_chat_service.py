@@ -94,7 +94,7 @@ class ChatServiceTests(unittest.TestCase):
 
 class SessionStoreTests(unittest.TestCase):
     def test_lru_eviction_and_delete(self):
-        store = SessionStore(max_sessions=2, factory=lambda path: object())
+        store = SessionStore(max_sessions=2, factory=lambda paths, session_id: object(), restorer=lambda session_id: None)
         first, _ = store.create([Path('/a')])
         second, _ = store.create([Path('/b')])
         store.get(first)

@@ -433,6 +433,12 @@ class CodeChatAgent(FunctionCallAgent):
         reason = {TIMEOUT: "等待用户确认超时", STOPPED: "用户停止了回答"}.get(decision, "用户拒绝了访问")
         return f"{TOOL_ERROR_PREFIX}：{reason}（{root}）。请不要再次尝试打开该路径；可以询问用户是否有其他项目路径。"
 
+    def restore_turns(self, turns: list[Turn]) -> None:
+        """恢复已保存对话的历史；超过预算一半时与每轮结束时一样，从最早一轮开始删除。"""
+        self.turns = list(turns)
+        while len(self.turns) > 1 and self._history_tokens() > self.context.history_limit:
+            self.turns.pop(0)
+
     def _history_tokens(self) -> int:
         return self.context.estimate([message for turn in self.turns for message in turn.to_messages()])
 
