@@ -26,6 +26,8 @@ MAX_SCANNED_FILES = 5000
 MAX_SEARCH_RESULTS = 50
 MAX_DIRECTORY_ENTRIES = 200
 MAX_READ_LINES = 200
+# 单次工具结果返回给模型的最大字符数，避免一次读取占满上下文。
+MAX_TOOL_RESULT_CHARS = 20000
 
 
 def is_blocked_name(name: str) -> bool:
@@ -205,9 +207,15 @@ class CodeTool(Tool):
         """执行工具并将参数或文件错误转换成模型可读的结果。"""
         print(f"\n[工具] {self.name}：{parameters}", flush=True)
         try:
-            return self.operation(**parameters)
+            result = self.operation(**parameters)
         except (ValueError, TypeError, OSError, UnicodeError) as exc:
             return f"工具执行失败：{exc}。请检查参数后重试。"
+        if len(result) > MAX_TOOL_RESULT_CHARS:
+            result = (
+                result[:MAX_TOOL_RESULT_CHARS]
+                + f"\n…（结果已截断：超过 {MAX_TOOL_RESULT_CHARS} 字符，请缩小行范围或搜索词）"
+            )
+        return result
 
 
 def create_code_registry(root: Path) -> ToolRegistry:

@@ -11,7 +11,7 @@ BACKEND_DIR = Path(__file__).resolve().parent
 if str(BACKEND_DIR) not in sys.path or sys.path[0] != str(BACKEND_DIR):
     sys.path.insert(0, str(BACKEND_DIR))
 
-from app.agents.chat_agent import create_chat_agent
+from app.services.chat_service import CodeChatSession, open_project
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -29,25 +29,18 @@ def main() -> int:
     parser.add_argument("question", nargs="*", help="可选问题；不提供则进入多轮对话")
     args = parser.parse_args()
     try:
-        agent = create_chat_agent(args.project)
+        project = open_project(args.project) if args.project is not None else None
+        session = CodeChatSession(project)
     except (ValueError, OSError) as exc:
         print(f"启动失败：{exc}", file=sys.stderr)
         return 1
 
     def reply(question: str) -> bool:
-        """复用同一个 Agent 回答，保留当前进程中的对话历史。"""
+        """复用同一个会话回答，保留当前进程中的对话历史。"""
         try:
-            answer = agent.run(
-                question,
-                max_tool_iterations=6,
-                max_tokens=1024,
-                extra_body={"enable_thinking": False},
-            )
+            answer = session.ask(question)
         except Exception as exc:
             print(f"请求失败：{exc}", file=sys.stderr)
-            return False
-        if not answer or not answer.strip():
-            print("模型未返回有效回答，请检查模型配置和服务状态。", file=sys.stderr)
             return False
         print(f"\n助手：{answer}\n")
         return True
@@ -60,10 +53,7 @@ def main() -> int:
             return 1
         return 0 if reply(question) else 1
 
-    project_description = (
-        args.project.expanduser().resolve() if args.project else "未选择（普通聊天模式）"
-    )
-    print(f"当前项目：{project_description}")
+    print(f"当前项目：{project or '未选择（普通聊天模式）'}")
     print("代码分析助手已启动。输入 exit 或 quit 退出，Ctrl+D 也可结束对话。")
     while True:
         try:
