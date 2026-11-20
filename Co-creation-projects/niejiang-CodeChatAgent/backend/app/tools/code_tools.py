@@ -1,11 +1,14 @@
-"""提供限定在项目目录内的只读代码浏览、搜索和读取工具。"""
+"""提供限定在项目目录内的只读代码浏览、搜索和读取工具，以及按需打开项目的工具。"""
 
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from hello_agents.tools import Tool, ToolParameter, ToolRegistry
+
+if TYPE_CHECKING:
+    from app.projects.project_set import ProjectSet
 
 # 跳过依赖和构建产物，限制搜索范围及返回给模型的内容量。
 # 名称均为小写，比较时统一转小写，避免在不区分大小写的文件系统上被绕过。
@@ -217,44 +220,69 @@ class CodeTool(Tool):
         return result
 
 
-def create_code_registry(root: Path) -> ToolRegistry:
-    """创建与指定项目关联的工具注册表。"""
-    workspace = CodeWorkspace(root)
+PROJECT_PARAMETER_DESCRIPTION = "已打开项目的简称；只打开了一个项目时可省略，打开多个项目时必须指定"
+
+
+def project_parameter() -> ToolParameter:
+    return ToolParameter(name="project", type="string", description=PROJECT_PARAMETER_DESCRIPTION, required=False)
+
+
+def create_code_registry(projects: "ProjectSet") -> ToolRegistry:
+    """创建绑定会话项目集合的工具注册表；工具集固定，未打开项目时文件工具返回提示。"""
     registry = ToolRegistry()
     registry.register_tool(
         CodeTool(
+            name="open_project",
+            description=(
+                "打开一个本地项目，返回其简称、技术栈、README 简介和顶层目录。"
+                "参数为用户消息中给出的绝对路径（可用 ~/ 开头），或已授权项目的简称。"
+                "用户提到某个项目而它尚未打开时先调用本工具；无法确定是哪个项目时先询问用户。"
+            ),
+            parameters=[ToolParameter(name="path", type="string", description="项目绝对路径，或已授权项目的简称")],
+            operation=projects.tool_open,
+            constraints={"path": {"minLength": 1, "maxLength": 1024}},
+        )
+    )
+    registry.register_tool(
+        CodeTool(
             name="list_files",
-            description="列出项目内某个目录的直接子项，目录以 / 结尾。用于了解项目结构。",
+            description="列出已打开项目中某个目录的直接子项，目录以 / 结尾。用于了解项目结构。",
             parameters=[
+                project_parameter(),
                 ToolParameter(
                     name="path", type="string", description="项目内的相对目录路径，根目录用 .",
                     required=False, default=".",
-                )
+                ),
             ],
-            operation=workspace.list_files,
-            constraints={"path": {"maxLength": 1024}},
+            operation=projects.tool_list,
+            constraints={"project": {"maxLength": 200}, "path": {"maxLength": 1024}},
         )
     )
     registry.register_tool(
         CodeTool(
             name="search_code",
             description=(
-                "按字面文本不区分大小写地搜索项目文件内容，返回“相对路径:行号: 该行内容”，最多 50 条。"
+                "按字面文本不区分大小写地搜索项目文件内容，返回“相对路径:行号: 该行内容”，每个项目最多 50 条。"
                 "用于定位函数、类、配置项的定义和调用处；不支持正则表达式。"
+                "打开多个项目时省略 project 会搜索全部已打开项目，结果行以“项目简称:”开头，适合比较项目。"
             ),
-            parameters=[ToolParameter(name="query", type="string", description="要搜索的字面文本，可包含括号、逗号等符号")],
-            operation=workspace.search,
-            constraints={"query": {"minLength": 1, "maxLength": 200}},
+            parameters=[
+                project_parameter(),
+                ToolParameter(name="query", type="string", description="要搜索的字面文本，可包含括号、逗号等符号"),
+            ],
+            operation=projects.tool_search,
+            constraints={"project": {"maxLength": 200}, "query": {"minLength": 1, "maxLength": 200}},
         )
     )
     registry.register_tool(
         CodeTool(
             name="read_file",
             description=(
-                "读取项目内 UTF-8 文本文件的指定行范围（包含首尾行），返回带行号的内容，每次最多 200 行。"
+                "读取已打开项目中 UTF-8 文本文件的指定行范围（包含首尾行），返回带行号的内容，每次最多 200 行。"
                 "通常先用 search_code 找到行号，再读取附近代码。"
             ),
             parameters=[
+                project_parameter(),
                 ToolParameter(name="path", type="string", description="项目内的文件相对路径"),
                 ToolParameter(
                     name="start", type="integer", description="起始行号，从 1 开始",
@@ -265,8 +293,9 @@ def create_code_registry(root: Path) -> ToolRegistry:
                     required=False, default=100,
                 ),
             ],
-            operation=workspace.read_file,
-            constraints={"path": {"minLength": 1, "maxLength": 1024}, "start": {"minimum": 1}, "end": {"minimum": 1}},
+            operation=projects.tool_read,
+            constraints={"project": {"maxLength": 200}, "path": {"minLength": 1, "maxLength": 1024},
+                         "start": {"minimum": 1}, "end": {"minimum": 1}},
         )
     )
     return registry

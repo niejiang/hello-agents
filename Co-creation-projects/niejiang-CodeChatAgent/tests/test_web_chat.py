@@ -9,6 +9,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 from fastapi.testclient import TestClient
 from app.api.web import app, store
+from app.projects.authorized import AuthorizedProjects
 
 
 class FakeAgent:
@@ -40,9 +41,13 @@ class WebChatTests(unittest.TestCase):
         self.client = TestClient(app)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        patcher = patch('app.services.chat_service.create_chat_agent', side_effect=lambda path: FakeAgent())
+        patcher = patch('app.services.chat_service.create_chat_agent', side_effect=lambda projects: FakeAgent())
         patcher.start()
         self.addCleanup(patcher.stop)
+        # 测试不写入本机的已授权项目清单。
+        authorized = patch('app.services.chat_service.authorized_store', AuthorizedProjects(None))
+        authorized.start()
+        self.addCleanup(authorized.stop)
 
     def create(self):
         return self.client.post('/api/sessions', json={'project_path': self.temp.name}).json()
@@ -57,6 +62,19 @@ class WebChatTests(unittest.TestCase):
         self.assertEqual(self.send(second['session_id'], '三').json()['content'][0]['text'], '三')
         self.assertEqual(self.send(first['session_id'], '  ').status_code, 422)
         self.assertEqual(self.send('missing', 'hi').status_code, 404)
+
+    def test_session_without_project(self):
+        for kwargs in ({}, {'json': {}}, {'json': {'project_path': '  '}}):
+            with self.subTest(kwargs=kwargs):
+                response = self.client.post('/api/sessions', **kwargs)
+                self.assertEqual(response.status_code, 200)
+                self.assertIsNone(response.json()['project_path'])
+                self.assertEqual(self.send(response.json()['session_id'], '你好').json()['content'][0]['text'], '你好')
+
+    def test_denied_project_path(self):
+        response = self.client.post('/api/sessions', json={'project_path': '/'})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('系统目录', response.json()['detail'])
 
     def test_invalid_path(self):
         self.assertEqual(self.client.post('/api/sessions', json={'project_path': '/does/not/exist'}).status_code, 400)

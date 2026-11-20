@@ -1,18 +1,24 @@
-"""代码问答会话：统一项目校验、运行参数和问答调用，供命令行和网页共用。"""
+"""对话会话：统一项目校验、运行参数和问答调用，供命令行和网页共用。"""
 
 import logging
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from app.agents.chat_agent import create_chat_agent
+from app.projects.authorized import AuthorizedProjects
+from app.projects.project_set import ProjectSet
 
 logger = logging.getLogger(__name__)
 
 MAX_TOOL_ITERATIONS = 6
 MAX_ANSWER_TOKENS = 4096
+# 已授权项目清单保存在本机，不提交到仓库（见 .gitignore 中的 data/）。
+AUTHORIZED_PROJECTS_FILE = Path(__file__).resolve().parents[3] / "data" / "authorized_projects.json"
+# 命令行和网页的所有会话共用同一份清单。
+authorized_store = AuthorizedProjects(AUTHORIZED_PROJECTS_FILE)
 
 Event = dict[str, Any]
 
@@ -63,19 +69,24 @@ def open_project(path: str | Path) -> Path:
 
 
 class CodeChatSession:
-    """一个会话绑定一个项目和一个 Agent；同一会话同时只处理一条消息，以保护对话历史。"""
+    """一个会话对应一个 Agent 和一组按需打开的项目；同一会话同时只处理一条消息，以保护对话历史。"""
 
-    def __init__(self, project_path: Path | None, options: ChatOptions | None = None) -> None:
-        self.project_path = project_path
+    def __init__(self, project_paths: Sequence[Path] = (), options: ChatOptions | None = None,
+                 authorized: AuthorizedProjects | None = None) -> None:
+        """project_paths 为用户预先指定的项目（如命令行 --project），直接打开并加入已授权项目。"""
         self.options = options or ChatOptions()
-        self.agent = create_chat_agent(project_path)
+        self.projects = ProjectSet(authorized if authorized is not None else authorized_store)
+        for path in project_paths:
+            self.projects.open(str(path), explicit=True)
+        self.projects.drain_opened()
+        self.agent = create_chat_agent(self.projects)
         self._lock = threading.Lock()
         self._stop = threading.Event()
 
     def ask_stream(self, question: str, should_stop: Callable[[], bool] | None = None) -> Iterator[Event]:
         """开始回答并返回事件迭代器；会话忙时立即抛出 SessionBusyError。
 
-        事件依次为 start、若干 text_delta / tool_start / tool_end / context_trimmed，
+        事件依次为 start、若干 text_delta / tool_start / tool_end / project_opened / context_trimmed，
         最后是 done、stopped 或 error 之一。
         """
         question = question.strip()

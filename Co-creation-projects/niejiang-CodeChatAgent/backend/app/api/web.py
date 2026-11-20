@@ -10,6 +10,7 @@ from starlette.concurrency import iterate_in_threadpool
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field, field_validator
 
+from app.projects.project_set import ProjectAccessError
 from app.services.chat_service import ProjectPathError, SessionBusyError, open_project
 from app.services.session_store import SessionStore
 
@@ -31,7 +32,8 @@ async def check_browser_origin(request: Request, call_next):
 
 
 class CreateSessionRequest(BaseModel):
-    project_path: str = Field(min_length=1, max_length=4096)
+    # 可选：不指定时直接开始对话，项目在对话中按需打开。
+    project_path: str | None = Field(default=None, max_length=4096)
 
 
 class MessageRequest(BaseModel):
@@ -46,17 +48,22 @@ class MessageRequest(BaseModel):
 
 
 @app.post('/api/sessions')
-def create_session(body: CreateSessionRequest):
+def create_session(body: CreateSessionRequest | None = None):
+    project = None
+    if body is not None and body.project_path and body.project_path.strip():
+        try:
+            project = open_project(body.project_path)
+        except ProjectPathError:
+            raise HTTPException(status_code=400, detail='项目目录不存在或不可访问')
     try:
-        project = open_project(body.project_path)
-    except ProjectPathError:
-        raise HTTPException(status_code=400, detail='项目目录不存在或不可访问')
-    try:
-        session_id, _ = store.create(project)
+        session_id, _ = store.create([project] if project else [])
+    except ProjectAccessError as exc:
+        # 例如指定了系统目录或主目录本身。
+        raise HTTPException(status_code=400, detail=str(exc))
     except Exception:
         logger.exception('创建会话失败')
         raise HTTPException(status_code=500, detail='创建助手失败，请检查服务端配置')
-    return {'session_id': session_id, 'project_path': str(project)}
+    return {'session_id': session_id, 'project_path': str(project) if project else None}
 
 
 @app.delete('/api/sessions/{session_id}', status_code=204)

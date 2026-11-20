@@ -11,6 +11,7 @@ from app.services.chat_service import (
     open_project,
 )
 from app.services.session_store import SessionStore
+from app.projects.authorized import AuthorizedProjects
 from app.tools.code_tools import MAX_TOOL_RESULT_CHARS, CodeTool
 
 
@@ -36,9 +37,9 @@ class ChatServiceTests(unittest.TestCase):
 
     def test_ask_passes_run_options(self):
         self.agent.run_stream.return_value = iter([{'type': 'text_delta', 'text': '回答'}, done('回答')])
-        session = CodeChatSession(Path('/tmp'))
+        session = CodeChatSession(authorized=AuthorizedProjects(None))
         self.assertEqual(session.ask('  问题  '), '回答')
-        self.create_agent.assert_called_once_with(Path('/tmp'))
+        self.create_agent.assert_called_once_with(session.projects)
         self.agent.run_stream.assert_called_once_with(
             '问题', should_stop=ANY, max_tool_iterations=MAX_TOOL_ITERATIONS, max_tokens=MAX_ANSWER_TOKENS,
             extra_body={'enable_thinking': False},
@@ -46,7 +47,7 @@ class ChatServiceTests(unittest.TestCase):
         self.assertEqual(MAX_ANSWER_TOKENS, 4096)
 
     def test_ask_rejects_empty_question_and_answer(self):
-        session = CodeChatSession(None)
+        session = CodeChatSession(authorized=AuthorizedProjects(None))
         with self.assertRaises(ValueError):
             session.ask('   ')
         self.agent.run_stream.return_value = iter([done(' ')])
@@ -59,7 +60,7 @@ class ChatServiceTests(unittest.TestCase):
             raise RuntimeError('boom')
 
         self.agent.run_stream.side_effect = failing
-        session = CodeChatSession(None)
+        session = CodeChatSession(authorized=AuthorizedProjects(None))
         with patch('app.services.chat_service.logger'):
             events = list(session.ask_stream('问题'))
         self.assertEqual([e['type'] for e in events], ['start', 'text_delta', 'error'])
@@ -67,7 +68,7 @@ class ChatServiceTests(unittest.TestCase):
 
     def test_busy_session_rejects_second_stream_and_releases_lock(self):
         self.agent.run_stream.side_effect = lambda *a, **k: iter([{'type': 'text_delta', 'text': '一'}, done('一')])
-        session = CodeChatSession(None)
+        session = CodeChatSession(authorized=AuthorizedProjects(None))
         first = session.ask_stream('问题')
         self.assertEqual(next(first)['type'], 'start')
         with self.assertRaises(SessionBusyError):
@@ -85,7 +86,7 @@ class ChatServiceTests(unittest.TestCase):
             yield {'type': 'stopped'}
 
         self.agent.run_stream.side_effect = run_stream
-        session = CodeChatSession(None)
+        session = CodeChatSession(authorized=AuthorizedProjects(None))
         self.assertEqual([e['type'] for e in session.ask_stream('一')], ['start', 'stopped'])
         list(session.ask_stream('二'))
         self.assertEqual(seen, [False, True, False, True])
@@ -94,10 +95,10 @@ class ChatServiceTests(unittest.TestCase):
 class SessionStoreTests(unittest.TestCase):
     def test_lru_eviction_and_delete(self):
         store = SessionStore(max_sessions=2, factory=lambda path: object())
-        first, _ = store.create(Path('/a'))
-        second, _ = store.create(Path('/b'))
+        first, _ = store.create([Path('/a')])
+        second, _ = store.create([Path('/b')])
         store.get(first)
-        third, _ = store.create(Path('/c'))
+        third, _ = store.create([Path('/c')])
         self.assertIn(first, store)
         self.assertNotIn(second, store)
         self.assertIn(third, store)

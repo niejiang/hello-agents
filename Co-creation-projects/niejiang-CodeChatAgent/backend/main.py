@@ -28,18 +28,19 @@ def format_arguments(arguments: object) -> str:
 def main() -> int:
     """加载配置并启动单轮问答或交互式多轮对话。"""
     load_dotenv(PROJECT_ROOT / ".env")
-    parser = argparse.ArgumentParser(description="与代码分析助手对话")
+    parser = argparse.ArgumentParser(description="与助手对话；需要分析项目时，在对话中给出项目路径即可")
     parser.add_argument(
         "--project",
         type=Path,
-        default=None,
-        help="要分析的本地项目目录；不指定时进入普通聊天模式，无法访问本地文件",
+        action="append",
+        default=[],
+        help="预先打开的本地项目目录，可多次指定；不指定时也可在对话中给出路径按需打开",
     )
     parser.add_argument("question", nargs="*", help="可选问题；不提供则进入多轮对话")
     args = parser.parse_args()
     try:
-        project = open_project(args.project) if args.project is not None else None
-        session = CodeChatSession(project)
+        projects = [open_project(path) for path in args.project]
+        session = CodeChatSession(projects)
     except (ValueError, OSError) as exc:
         print(f"启动失败：{exc}", file=sys.stderr)
         return 1
@@ -60,6 +61,10 @@ def main() -> int:
                 elif kind == "tool_end":
                     status = "✓" if event["ok"] else "✗"
                     print(f" → {status} {event['lines']} 行", flush=True)
+                    at_line_start = True
+                elif kind == "project_opened":
+                    stack = "·".join(event["stack"]) or "未识别技术栈"
+                    print(f"  · 已打开项目 {event['name']}（{stack}，{event['path']}）", flush=True)
                     at_line_start = True
                 elif kind == "context_trimmed":
                     print(f"\n  （{event['reason']}）", flush=True)
@@ -88,8 +93,9 @@ def main() -> int:
             return 1
         return 0 if reply(question) else 1
 
-    print(f"当前项目：{project or '未选择（普通聊天模式）'}")
-    print("代码分析助手已启动。输入 exit 或 quit 退出，Ctrl+D 也可结束对话。")
+    opened = "、".join(f"{p.alias}（{p.root}）" for p in session.projects.projects())
+    print(f"已打开项目：{opened or '无，可在对话中给出项目路径'}")
+    print("助手已启动。输入 exit 或 quit 退出，Ctrl+D 也可结束对话。")
     while True:
         try:
             question = input("你：").strip()

@@ -13,6 +13,8 @@ import openai
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 from app.agents.chat_agent import ContextBudget, create_chat_agent
+from app.projects.authorized import AuthorizedProjects
+from app.projects.project_set import ProjectSet
 
 ENV = {
     "LLM_MODEL_ID": "test-model", "LLM_API_KEY": "test-key", "LLM_BASE_URL": "http://127.0.0.1:9/v1",
@@ -81,8 +83,11 @@ class ChatAgentTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         root = Path(self.temp.name)
         (root / "app.py").write_text("x = foo(a, b)\nitems[0] = 1\n", encoding="utf-8")
+        self.projects = ProjectSet(AuthorizedProjects(None))
+        self.alias = self.projects.open(str(root), explicit=True).alias
+        self.projects.drain_opened()
         with patch.dict("os.environ", ENV):
-            self.agent = create_chat_agent(root)
+            self.agent = create_chat_agent(self.projects)
 
     def use(self, *rounds):
         completions = FakeCompletions(rounds)
@@ -130,7 +135,7 @@ class ChatAgentTests(unittest.TestCase):
         self.assertTrue(request["stream"])
         self.assertEqual(request["stream_options"], {"include_usage": True})
         schemas = {tool["function"]["name"]: tool["function"]["parameters"] for tool in request["tools"]}
-        self.assertEqual(set(schemas), {"list_files", "search_code", "read_file"})
+        self.assertEqual(set(schemas), {"open_project", "list_files", "search_code", "read_file"})
         self.assertTrue(all(schema["additionalProperties"] is False for schema in schemas.values()))
         self.assertEqual(schemas["read_file"]["properties"]["start"]["minimum"], 1)
         self.assertEqual(request["tool_choice"], "auto")
@@ -179,9 +184,9 @@ class ChatAgentTests(unittest.TestCase):
         self.events("第二问")
         messages = completions.requests[2]["messages"]
         self.assertEqual([m["role"] for m in messages], ["system", "user", "assistant", "user"])
-        self.assertIn("[系统记录：回答本问题时读取了 app.py:1-1]", messages[1]["content"])
+        self.assertIn(f"[系统记录：回答本问题时在 {self.alias} 中读取了 app.py:1-1]", messages[1]["content"])
         self.assertEqual(messages[2]["content"], "第一轮回答")
-        self.assertEqual(messages[3]["content"], "第二问")
+        self.assertTrue(messages[3]["content"].startswith("第二问\n\n[系统记录（自动附加"))
 
     def test_history_trimmed_to_half_of_budget(self):
         """M1：历史超过工作预算的一半时，整轮删除最早的对话，至少保留最新一轮。"""
@@ -218,7 +223,7 @@ class ChatAgentTests(unittest.TestCase):
         self.assertEqual(events[-1]["answer"], "重试成功")
         retry = [m["content"] for m in completions.requests[-1]["messages"]]
         self.assertNotIn("第一问", retry)
-        self.assertEqual(retry[-1], "第二问")
+        self.assertTrue(retry[-1].startswith("第二问"))
 
     def test_hard_limit_trims_before_request(self):
         self.agent.context = ContextBudget(budget=100, max_input=100)
@@ -234,7 +239,7 @@ class ChatAgentTests(unittest.TestCase):
                                [chunk("回答")])
         done = self.events()[-1]
         first, second = self.tool_messages(completions.requests[2])
-        self.assertTrue(first["content"].startswith("[已清理：后文重新执行了相同调用（读取了 app.py:1-2）"))
+        self.assertTrue(first["content"].startswith(f"[已清理：后文重新执行了相同调用（在 {self.alias} 中读取了 app.py:1-2）"))
         self.assertIn("1: x = foo(a, b)", second["content"])
         self.assertEqual(first["tool_call_id"], "c1")
         self.assertEqual(done["context"]["cleared_tool_results"], 1)
@@ -254,13 +259,13 @@ class ChatAgentTests(unittest.TestCase):
         last = completions.requests[-1]["messages"]
         results = self.tool_messages(completions.requests[-1])
         self.assertEqual([r["content"].startswith("[已清理") for r in results], [True, True, False, False, False])
-        self.assertIn("此前读取了 big.py:1-100", results[0]["content"])
+        self.assertIn(f"此前在 {self.alias} 中读取了 big.py:1-100", results[0]["content"])
         self.assertIn("value_499", results[-1]["content"])
         # 工具调用与结果仍一一配对。
         call_ids = [c["id"] for m in last if m["role"] == "assistant" and m.get("tool_calls") for c in m["tool_calls"]]
         self.assertEqual(call_ids, [r["tool_call_id"] for r in results])
         self.assertEqual(events[-1]["context"]["cleared_tool_results"], 2)
-        self.assertEqual(self.agent.turns[-1].tool_summary.count("读取了 big.py"), 5)
+        self.assertEqual(self.agent.turns[-1].tool_summary.count("中读取了 big.py"), 5)
 
     def test_stop_ends_turn_without_recording_history(self):
         completions = self.use([chunk("一"), chunk("二"), chunk("三")])
@@ -278,10 +283,17 @@ class ChatAgentTests(unittest.TestCase):
         self.assertEqual(self.agent.turns, [])
         self.assertTrue(completions.streams[0].closed)
 
-    def test_without_project_has_no_tools(self):
+    def test_without_project_tools_ask_to_open_one(self):
+        """未打开项目时工具集不变，文件工具提示先打开项目；用户消息不附加空的项目清单。"""
         with patch.dict("os.environ", ENV):
             agent = create_chat_agent(None)
-        self.assertEqual(agent._build_tool_schemas(), [])
+        self.assertEqual(len(agent._build_tool_schemas()), 4)
+        agent.llm._client = self.agent.llm._client
+        completions = FakeCompletions([tool_round(("c1", "read_file", json.dumps({"path": "a.py"}))), [chunk("请提供路径")]])
+        agent.llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+        list(agent.run_stream("你好", max_tool_iterations=2))
+        self.assertEqual(completions.requests[0]["messages"][-1]["content"], "你好")
+        self.assertIn("尚未打开任何项目", self.tool_messages(completions.requests[1])[0]["content"])
 
     def test_context_settings_are_required(self):
         for override, message in (({"LLM_CONTEXT_BUDGET": ""}, "LLM_CONTEXT_BUDGET"),

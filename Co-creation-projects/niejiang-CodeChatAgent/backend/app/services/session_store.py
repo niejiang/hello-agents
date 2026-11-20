@@ -2,7 +2,7 @@
 
 import threading
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from uuid import uuid4
 
@@ -17,17 +17,17 @@ class SessionStore:
     def __init__(
         self,
         max_sessions: int = MAX_SESSIONS,
-        factory: Callable[[Path], CodeChatSession] = CodeChatSession,
+        factory: Callable[[Sequence[Path]], CodeChatSession] = CodeChatSession,
     ) -> None:
         self.max_sessions = max_sessions
         self._factory = factory
         self._sessions: OrderedDict[str, CodeChatSession] = OrderedDict()
         self._lock = threading.Lock()
 
-    def create(self, project_path: Path) -> tuple[str, CodeChatSession]:
-        """为项目创建会话并返回会话 ID。"""
+    def create(self, project_paths: Sequence[Path] = ()) -> tuple[str, CodeChatSession]:
+        """创建会话并返回会话 ID；project_paths 为用户预先指定、直接打开的项目。"""
         # 创建 Agent 可能较慢，放在锁外执行。
-        session = self._factory(project_path)
+        session = self._factory(project_paths)
         session_id = uuid4().hex
         with self._lock:
             self._sessions[session_id] = session
