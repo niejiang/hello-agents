@@ -81,8 +81,10 @@ cp .env.example .env
 
 `.env` 还需要两项上下文配置，缺失或无效时程序会拒绝启动：
 
-- `LLM_MAX_INPUT_TOKENS`：模型最大输入长度，作为硬上限兜底；`qwen3.7-plus`（北京区域、非思考模式）为 991808。
-- `LLM_CONTEXT_BUDGET`：实际工作预算，当前取 128000。`qwen3.7-plus` 单次请求输入超过 256K 时单价翻 3 倍，而工具循环每轮都会重发整个上下文，因此预算留在 256K 以下。
+- `LLM_MAX_INPUT_TOKENS`：模型最大输入长度，作为硬上限兜底；`qwen4-max`（北京区域、非思考模式）为 991808。
+- `LLM_CONTEXT_BUDGET`：实际工作预算，当前取 128000。`qwen4-max` 北京区域输入 10 元、输出 30 元、缓存命中 0.5 元（每百万 Token，不分档）；工具循环每轮都会重发整个上下文，预算决定单次请求的最高输入成本（128K 约 1.28 元，命中缓存的部分按 5% 计价）。
+
+`qwen4-max` 默认开启思考模式，本项目通过 `extra_body={"enable_thinking": False}` 关闭（见 `backend/app/services/chat_service.py` 的 `ChatOptions`）；关闭后无需回传 `reasoning_content`，工具调用的 `tool_choice` 使用 `auto` / `none`。
 
 更换模型时，按百炼模型列表更新这两项。每轮回答结束时，命令行会显示本轮输入 Token 数和预算占用比例。
 
