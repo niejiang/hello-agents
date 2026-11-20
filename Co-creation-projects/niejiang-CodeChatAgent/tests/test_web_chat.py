@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 from fastapi.testclient import TestClient
+from app.api import web
 from app.api.web import app, sessions
 
 
@@ -42,3 +43,16 @@ class WebChatTests(unittest.TestCase):
 
     def test_invalid_path(self):
         self.assertEqual(self.client.post('/api/sessions', json={'project_path': '/does/not/exist'}).status_code, 400)
+
+    def test_delete_and_evict_sessions(self):
+        created = self.client.post('/api/sessions', json={'project_path': self.temp.name}).json()
+        self.assertEqual(self.client.delete(f"/api/sessions/{created['session_id']}").status_code, 204)
+        self.assertEqual(self.client.post(f"/api/sessions/{created['session_id']}/messages", json={'message': 'hi'}).status_code, 404)
+        with patch.object(web, 'MAX_SESSIONS', 2):
+            ids = [self.client.post('/api/sessions', json={'project_path': self.temp.name}).json()['session_id'] for _ in range(2)]
+            # 使用第一个会话后，第二个成为最久未使用，新建会话时被淘汰。
+            self.client.post(f'/api/sessions/{ids[0]}/messages', json={'message': 'hi'})
+            self.client.post('/api/sessions', json={'project_path': self.temp.name})
+            self.assertEqual(len(sessions), 2)
+            self.assertIn(ids[0], sessions)
+            self.assertNotIn(ids[1], sessions)

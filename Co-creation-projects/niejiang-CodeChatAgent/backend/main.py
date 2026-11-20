@@ -23,8 +23,8 @@ def main() -> int:
     parser.add_argument(
         "--project",
         type=Path,
-        default=Path("/Users/cloudy/workspace/ml_code_one"),
-        help="要分析的本地项目目录",
+        default=None,
+        help="要分析的本地项目目录；不指定时进入普通聊天模式，无法访问本地文件",
     )
     parser.add_argument("question", nargs="*", help="可选问题；不提供则进入多轮对话")
     args = parser.parse_args()

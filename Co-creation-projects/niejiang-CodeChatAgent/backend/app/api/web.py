@@ -1,6 +1,7 @@
 """本机 Web 聊天接口；每个会话独立绑定项目与 Agent。"""
 import logging
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from uuid import uuid4
@@ -36,7 +37,19 @@ class Session:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
-sessions: dict[str, Session] = {}
+# 会话只保存在内存中，超过上限时淘汰最久未使用的会话，避免长期运行时内存持续增长。
+MAX_SESSIONS = 20
+sessions: OrderedDict[str, Session] = OrderedDict()
+sessions_lock = threading.Lock()
+
+
+def get_session(session_id: str) -> Session | None:
+    """取出会话并标记为最近使用。"""
+    with sessions_lock:
+        session = sessions.get(session_id)
+        if session is not None:
+            sessions.move_to_end(session_id)
+        return session
 
 
 class CreateSessionRequest(BaseModel):
@@ -68,13 +81,23 @@ def create_session(body: CreateSessionRequest):
         logger.exception('创建 Agent 失败')
         raise HTTPException(status_code=500, detail='创建助手失败，请检查服务端配置')
     session_id = uuid4().hex
-    sessions[session_id] = Session(project, agent)
+    with sessions_lock:
+        sessions[session_id] = Session(project, agent)
+        while len(sessions) > MAX_SESSIONS:
+            sessions.popitem(last=False)
     return {'session_id': session_id, 'project_path': str(project)}
+
+
+@app.delete('/api/sessions/{session_id}', status_code=204)
+def delete_session(session_id: str):
+    """前端切换项目时释放旧会话；会话不存在时同样视为成功。"""
+    with sessions_lock:
+        sessions.pop(session_id, None)
 
 
 @app.post('/api/sessions/{session_id}/messages')
 def send_message(session_id: str, body: MessageRequest):
-    session = sessions.get(session_id)
+    session = get_session(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail='会话不存在，请重新创建')
     try:

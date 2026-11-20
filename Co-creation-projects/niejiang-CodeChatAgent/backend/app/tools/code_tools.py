@@ -8,10 +8,18 @@ from typing import Any
 from hello_agents.tools import Tool, ToolParameter, ToolRegistry
 
 # 跳过依赖和构建产物，限制搜索范围及返回给模型的内容量。
+# 名称均为小写，比较时统一转小写，避免在不区分大小写的文件系统上被绕过。
 EXCLUDED_DIRECTORIES = frozenset(
     {".git", ".idea", ".venv", "__pycache__", "build", "dist", "node_modules", "target", "venv"}
 )
-SENSITIVE_FILENAMES = frozenset({".npmrc", ".pypirc", "id_ed25519", "id_rsa"})
+# 常见凭据目录，整个目录都不浏览、不搜索、不读取。
+SENSITIVE_DIRECTORIES = frozenset({".ssh", ".aws", ".gnupg", ".kube", ".docker", ".azure", ".gcloud"})
+SENSITIVE_FILENAMES = frozenset(
+    {
+        ".npmrc", ".pypirc", ".netrc", "_netrc", ".git-credentials", ".pgpass", ".htpasswd",
+        "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519", "credentials", "credentials.json",
+    }
+)
 SENSITIVE_SUFFIXES = (".pem", ".key", ".p12", ".pfx", ".jks", ".keystore")
 MAX_FILE_SIZE = 1024 * 1024
 MAX_SCANNED_FILES = 5000
@@ -29,8 +37,14 @@ def is_blocked_name(name: str) -> bool:
     return (
         is_env_file
         or name in SENSITIVE_FILENAMES
+        or name in SENSITIVE_DIRECTORIES
         or name.endswith(SENSITIVE_SUFFIXES)
     )
+
+
+def is_skipped_name(name: str) -> bool:
+    """识别不应浏览或读取的目录及文件名，不区分大小写。"""
+    return name.lower() in EXCLUDED_DIRECTORIES or is_blocked_name(name)
 
 
 class CodeWorkspace:
@@ -54,8 +68,7 @@ class CodeWorkspace:
             current = current / part
             if (
                 current.is_symlink()
-                or part in EXCLUDED_DIRECTORIES
-                or is_blocked_name(part)
+                or is_skipped_name(part)
             ):
                 raise ValueError("路径被排除或为符号链接。")
 
@@ -75,8 +88,7 @@ class CodeWorkspace:
             for item in items:
                 if (
                     item.is_symlink()
-                    or item.name in EXCLUDED_DIRECTORIES
-                    or is_blocked_name(item.name)
+                    or is_skipped_name(item.name)
                 ):
                     continue
                 suffix = "/" if item.is_dir(follow_symlinks=False) else ""
@@ -121,8 +133,7 @@ class CodeWorkspace:
             directories[:] = sorted(
                 name
                 for name in directories
-                if name not in EXCLUDED_DIRECTORIES
-                and not is_blocked_name(name)
+                if not is_skipped_name(name)
                 and not (base_path / name).is_symlink()
             )
             for name in sorted(files):

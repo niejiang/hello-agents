@@ -31,6 +31,27 @@ class CodeWorkspaceTests(unittest.TestCase):
                 with self.subTest(path=path), self.assertRaises((ValueError, OSError)):
                     workspace.read_file(path)
 
+    def test_sensitive_names_and_case_insensitive_exclusion(self):
+        """凭据目录、扩展的密钥文件名，以及大小写变体都应被拦截。"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / ".aws").mkdir()
+            (root / ".aws" / "credentials").write_text("secret_token", encoding="utf-8")
+            (root / "id_ecdsa").write_text("secret_token", encoding="utf-8")
+            (root / ".git-credentials").write_text("secret_token", encoding="utf-8")
+            (root / ".git").mkdir()
+            (root / ".git" / "config").write_text("secret_token", encoding="utf-8")
+            (root / "app.py").write_text("print('ok')\n", encoding="utf-8")
+            workspace = CodeWorkspace(root)
+            listing = workspace.list_files()
+            for name in (".aws", "id_ecdsa", ".git-credentials", ".git"):
+                self.assertNotIn(name, listing)
+            self.assertEqual(workspace.search("secret_token"), "未找到匹配内容。")
+            # 在不区分大小写的文件系统上，.GIT 与 .git 指向同一目录。
+            for path in (".aws/credentials", "id_ecdsa", ".git-credentials", ".GIT/config", ".Git/config"):
+                with self.subTest(path=path), self.assertRaises((ValueError, OSError)):
+                    workspace.read_file(path)
+
 
 if __name__ == "__main__":
     unittest.main()
