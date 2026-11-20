@@ -3,7 +3,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'backend'))
 from app.services.chat_service import (
@@ -40,7 +40,7 @@ class ChatServiceTests(unittest.TestCase):
         self.assertEqual(session.ask('  问题  '), '回答')
         self.create_agent.assert_called_once_with(Path('/tmp'))
         self.agent.run_stream.assert_called_once_with(
-            '问题', should_stop=None, max_tool_iterations=MAX_TOOL_ITERATIONS, max_tokens=MAX_ANSWER_TOKENS,
+            '问题', should_stop=ANY, max_tool_iterations=MAX_TOOL_ITERATIONS, max_tokens=MAX_ANSWER_TOKENS,
             extra_body={'enable_thinking': False},
         )
         self.assertEqual(MAX_ANSWER_TOKENS, 4096)
@@ -74,6 +74,21 @@ class ChatServiceTests(unittest.TestCase):
             session.ask_stream('另一个问题')
         first.close()  # 模拟客户端断开
         self.assertEqual(session.ask('再问'), '一')
+
+    def test_stop_is_visible_to_agent_and_reset_for_next_question(self):
+        seen = []
+
+        def run_stream(question, should_stop, **kwargs):
+            seen.append(should_stop())
+            session.stop()
+            seen.append(should_stop())
+            yield {'type': 'stopped'}
+
+        self.agent.run_stream.side_effect = run_stream
+        session = CodeChatSession(None)
+        self.assertEqual([e['type'] for e in session.ask_stream('一')], ['start', 'stopped'])
+        list(session.ask_stream('二'))
+        self.assertEqual(seen, [False, True, False, True])
 
 
 class SessionStoreTests(unittest.TestCase):

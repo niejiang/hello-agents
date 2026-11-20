@@ -70,6 +70,7 @@ class CodeChatSession:
         self.options = options or ChatOptions()
         self.agent = create_chat_agent(project_path)
         self._lock = threading.Lock()
+        self._stop = threading.Event()
 
     def ask_stream(self, question: str, should_stop: Callable[[], bool] | None = None) -> Iterator[Event]:
         """开始回答并返回事件迭代器；会话忙时立即抛出 SessionBusyError。
@@ -96,10 +97,15 @@ class CodeChatSession:
     def _events(self, question: str, should_stop: Callable[[], bool] | None) -> Iterator[Event]:
         if not self._lock.acquire(blocking=False):
             raise SessionBusyError("上一条消息仍在处理中，请稍后再试")
+        self._stop.clear()
+
+        def stop_requested() -> bool:
+            return self._stop.is_set() or bool(should_stop and should_stop())
+
         try:
             yield {"type": "start"}
             try:
-                for event in self.agent.run_stream(question, should_stop=should_stop, **self.options.run_kwargs()):
+                for event in self.agent.run_stream(question, should_stop=stop_requested, **self.options.run_kwargs()):
                     if event["type"] == "done" and not event.get("answer", "").strip():
                         yield {"type": "error", "code": "empty_answer",
                                "message": "模型未返回有效回答，请检查模型配置和服务状态"}
@@ -110,6 +116,10 @@ class CodeChatSession:
                 yield {"type": "error", "code": "model_error", "message": "模型请求失败，请稍后重试"}
         finally:
             self._lock.release()
+
+    def stop(self) -> None:
+        """请求停止当前回答；Agent 在收到下一段模型输出或执行下一个工具前结束，并产出 stopped 事件。"""
+        self._stop.set()
 
     def ask(self, question: str) -> str:
         """非流式回答：收集事件并返回最终回答。"""

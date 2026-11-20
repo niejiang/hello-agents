@@ -91,6 +91,23 @@ class WebChatTests(unittest.TestCase):
         missing = self.client.post('/api/sessions/missing/messages/stream', json={'message': 'hi'})
         self.assertEqual(missing.status_code, 404)
 
+    def test_stop_endpoint_stops_running_answer(self):
+        session_id = self.create()['session_id']
+
+        def run_stream(agent, question, should_stop, **kwargs):
+            yield {'type': 'text_delta', 'text': '部分'}
+            # 模拟用户在回答过程中点击停止。
+            self.assertEqual(self.client.post(f'/api/sessions/{session_id}/stop').status_code, 204)
+            if should_stop():
+                yield {'type': 'stopped'}
+                return
+            yield {'type': 'done', 'answer': '不应到达', 'usage': {}, 'context': {}}
+
+        with patch.object(FakeAgent, 'run_stream', run_stream):
+            response = self.client.post(f'/api/sessions/{session_id}/messages/stream', json={'message': '一'})
+        self.assertEqual([name for name, _ in parse_sse(response.text)], ['start', 'text_delta', 'stopped'])
+        self.assertEqual(self.client.post('/api/sessions/missing/stop').status_code, 404)
+
     def test_delete_and_evict_sessions(self):
         created = self.create()
         self.assertEqual(self.client.delete(f"/api/sessions/{created['session_id']}").status_code, 204)

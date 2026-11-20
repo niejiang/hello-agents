@@ -106,7 +106,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .status.busy { background: #fff6e6; color: #b7791f; }
 .status.busy i { animation: pulse 1.2s infinite; }
 
-.conversation { flex: 1; overflow-y: auto; scroll-behavior: smooth; }
+.conversation { flex: 1; overflow-y: auto; }
 .thread { max-width: 780px; margin: 0 auto; padding: 28px 24px 12px; }
 
 /* 欢迎页 */
@@ -141,11 +141,43 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   background: linear-gradient(135deg, #1fb08f, #0f7f69); color: #fff; font-size: 13px; font-weight: 700;
 }
 .msg-main { flex: 1; min-width: 0; }
-.msg-actions { display: flex; gap: 4px; margin-top: 4px; margin-left: -8px; opacity: 0; transition: opacity .15s; }
-.msg.assistant:hover .msg-actions, .msg-actions:focus-within { opacity: 1; }
+.msg-actions { display: flex; align-items: center; gap: 8px; min-height: 24px; margin-top: 4px; margin-left: -8px; opacity: 0; transition: opacity .15s; }
+.msg.assistant:hover .msg-actions, .msg-actions:focus-within, .msg:last-child .msg-actions { opacity: 1; }
+.msg-meta { font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.msg-main > * + * { margin-top: 8px; }
+.msg-main > .msg-actions { margin-top: 4px; }
+
+/* 工具调用：默认折叠为一行，展开后逐条显示 */
+.tools { border: 1px solid var(--border); border-radius: 10px; background: var(--surface); font-size: 13px; }
+.tools summary {
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px; list-style: none; cursor: pointer;
+  color: var(--text-2); user-select: none;
+}
+.tools summary::-webkit-details-marker { display: none; }
+.tools summary:hover { color: var(--text); }
+.tools-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chevron { width: 14px; height: 14px; flex: none; fill: none; stroke: var(--muted); stroke-width: 2; transition: transform .15s; }
+.tools[open] .chevron { transform: rotate(90deg); }
+.tools ul { margin: 0; padding: 4px 10px 8px; list-style: none; border-top: 1px solid var(--border); }
+.tools li { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; padding: 3px 0; }
+.tools li code {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-family: var(--mono); font-size: 12px; color: var(--text-2);
+}
+.tool-meta { flex: none; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.tools li.is-error .tool-meta { color: var(--danger); }
+.tool-error { flex-basis: 100%; padding-left: 18px; color: var(--danger); font-size: 12px; overflow-wrap: anywhere; }
+.tool-icon { position: relative; width: 10px; height: 10px; flex: none; border-radius: 50%; background: var(--accent); }
+.tool-icon.is-error { background: var(--danger); }
+.tool-icon.is-running { background: none; border: 2px solid var(--accent-soft); border-top-color: var(--accent); animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.notice, .state-note { margin: 0; font-size: 12px; color: var(--muted); }
+.notice { padding: 4px 10px; border-radius: 8px; background: #fff6e6; color: #b7791f; }
+.error-note { color: var(--danger); }
 .unsupported { color: var(--muted); font-size: 13px; }
 
-.typing-body { display: flex; align-items: center; gap: 10px; height: 30px; color: var(--muted); font-size: 14px; }
+.typing-body { display: flex; align-items: center; gap: 10px; height: 26px; color: var(--muted); font-size: 14px; }
 .elapsed { font-variant-numeric: tabular-nums; font-size: 12px; }
 .dots { display: inline-flex; gap: 4px; }
 .dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); animation: bounce 1.2s infinite ease-in-out; }
@@ -211,6 +243,9 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 }
 .send:hover:not(:disabled) { background: var(--accent-hover); }
 .send:disabled { background: var(--border-strong); opacity: 1; }
+.send.stop { background: var(--text); }
+.send.stop:hover:not(:disabled) { background: #000; }
+.send.stop svg { fill: currentColor; stroke: none; }
 .send svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round; }
 .hint { display: flex; justify-content: center; gap: 16px; margin-top: 8px; font-size: 12px; color: var(--muted); }
 .hint span { display: inline-flex; align-items: center; gap: 3px; }

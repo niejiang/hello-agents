@@ -6,6 +6,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import iterate_in_threadpool
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field, field_validator
 
@@ -90,19 +91,26 @@ def to_sse(event: dict) -> str:
 
 @app.post('/api/sessions/{session_id}/messages/stream')
 def stream_message(session_id: str, body: MessageRequest):
-    """以 SSE 逐条推送回答事件；客户端断开时停止迭代，会话锁随之释放。"""
+    """以 SSE 逐条推送回答事件。"""
     session = require_session(session_id)
     try:
         events = session.ask_stream(body.message)
     except SessionBusyError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
 
-    def body_stream():
+    async def body_stream():
         try:
-            for event in events:
+            async for event in iterate_in_threadpool(events):
                 yield to_sse(event)
         finally:
-            events.close()
+            # 客户端断开时，后台线程可能仍在等待模型输出：通知 Agent 尽快结束，结束后会话锁随之释放。
+            session.stop()
 
     return StreamingResponse(body_stream(), media_type='text/event-stream',
                              headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})
+
+
+@app.post('/api/sessions/{session_id}/stop', status_code=204)
+def stop_message(session_id: str):
+    """停止会话中正在生成的回答；没有进行中的回答时不产生影响。"""
+    require_session(session_id).stop()
