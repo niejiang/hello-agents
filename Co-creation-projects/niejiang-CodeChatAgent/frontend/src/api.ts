@@ -5,13 +5,13 @@ export type ChatEvent =
   | { type: 'text_delta'; text: string }
   | { type: 'tool_start'; id: string; name: string; arguments: unknown }
   | { type: 'tool_end'; id: string; name: string; ok: boolean; summary: string; lines: number; truncated: boolean }
-  | { type: 'context_trimmed'; reason: string }
+  | { type: 'context_trimmed'; reason: string; scope?: 'history' | 'tool_results'; count?: number }
   | { type: 'stopped' }
   | { type: 'error'; code: string; message: string }
   | { type: 'done'; answer: string; usage: Usage; context: ContextInfo }
 
 export type Usage = { requests: number; prompt_tokens: number; completion_tokens: number; cached_tokens: number; last_prompt_tokens: number }
-export type ContextInfo = { budget: number; budget_percent: number; history_turns: number; trimmed_turns: number }
+export type ContextInfo = { budget: number; budget_percent: number; history_turns: number; trimmed_turns: number; cleared_tool_results?: number }
 
 async function post(url: string, body?: object, signal?: AbortSignal) {
   let response: Response

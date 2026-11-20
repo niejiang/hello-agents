@@ -1,4 +1,4 @@
-"""代码问答 Agent：原生工具调用、流式事件和上下文预算（M0 用量观测、M1 硬性保护）。"""
+"""代码问答 Agent：原生工具调用、流式事件和上下文预算（M0 用量观测、M1 硬性保护、M2 清理旧工具结果）。"""
 
 import json
 import logging
@@ -25,6 +25,12 @@ HISTORY_BUDGET_RATIO = 0.5
 HARD_LIMIT_RATIO = 0.95
 # 尚无实测用量时的字符→Token 估算比例，首次请求后用接口返回的用量校准。
 INITIAL_TOKENS_PER_CHAR = 0.6
+# 本轮估算输入超过工作预算的该比例时，清理较早的工具结果（M2）。
+TOOL_CLEAR_RATIO = 0.6
+# 清理时保留原文的最近工具结果条数。
+KEEP_RECENT_TOOL_RESULTS = 3
+# 短于该字符数的工具结果（如错误提示）清理收益很小，保持原样。
+MIN_CLEARABLE_CHARS = 500
 # 超长兜底时，每条工具结果保留的字符数。
 OVERFLOW_TOOL_RESULT_CHARS = 2000
 MAX_TRACE_ITEMS = 10
@@ -77,6 +83,10 @@ class ContextBudget:
         return int(self.budget * HISTORY_BUDGET_RATIO)
 
     @property
+    def tool_clear_limit(self) -> int:
+        return int(self.budget * TOOL_CLEAR_RATIO)
+
+    @property
     def hard_limit(self) -> int:
         return int(self.max_input * HARD_LIMIT_RATIO)
 
@@ -109,6 +119,46 @@ def summarize_result(output: str) -> dict[str, Any]:
         "chars": len(output),
         "truncated": "已截断" in output or "上限" in output,
     }
+
+
+@dataclass
+class ToolRecord:
+    """本轮一条工具结果在消息列表中的位置和说明，用于 M2 清理。"""
+
+    index: int
+    label: str
+    cleared: bool = False
+
+
+def clear_tool_result(messages: list[dict[str, Any]], record: ToolRecord, note: str) -> None:
+    """把工具结果替换为占位说明；工具调用本身（名称和参数）保留在助手消息中，配对关系不变。"""
+    messages[record.index] = {**messages[record.index], "content": f"[已清理：{note}，需要时可重新调用工具获取]"}
+    record.cleared = True
+
+
+def dedupe_tool_results(messages: list[dict[str, Any]], records: list[ToolRecord]) -> int:
+    """M2：相同调用（如同一文件的同一行范围）重复执行时，只保留最新一次的结果。"""
+    latest: dict[str, int] = {}
+    for position, record in enumerate(records):
+        latest[record.label] = position
+    cleared = 0
+    for position, record in enumerate(records):
+        if not record.cleared and latest[record.label] != position:
+            clear_tool_result(messages, record, f"后文重新执行了相同调用（{record.label}），以后者为准")
+            cleared += 1
+    return cleared
+
+
+def clear_old_tool_results(messages: list[dict[str, Any]], records: list[ToolRecord],
+                           keep: int = KEEP_RECENT_TOOL_RESULTS) -> int:
+    """M2：保留最近 keep 条工具结果原文，较早且较长的结果替换为占位说明。"""
+    cleared = 0
+    for record in records[:-keep] if keep else records:
+        content = messages[record.index].get("content") or ""
+        if not record.cleared and len(content) >= MIN_CLEARABLE_CHARS:
+            clear_tool_result(messages, record, f"此前{record.label}的结果")
+            cleared += 1
+    return cleared
 
 
 class CodeChatAgent(FunctionCallAgent):
@@ -250,15 +300,25 @@ class CodeChatAgent(FunctionCallAgent):
         usage = {"requests": 0, "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0,
                  "last_prompt_tokens": 0, "last_estimated_prompt_tokens": 0}
         trace: list[str] = []
+        records: list[ToolRecord] = []
+        cleared_total = 0
         answer = ""
 
         for iteration in range(max_tool_iterations + 1):
             force_answer = iteration == max_tool_iterations
+            # M2：本轮占用超过工作预算的 60% 时，清理较早的工具结果，只保留最近几条原文。
+            if self.context.estimate({"messages": messages, "tools": tools}) > self.context.tool_clear_limit:
+                cleared = clear_old_tool_results(messages, records)
+                if cleared:
+                    cleared_total += cleared
+                    yield {"type": "context_trimmed", "scope": "tool_results", "count": cleared,
+                           "reason": f"已清理本轮较早的 {cleared} 条工具结果以节省上下文，需要时会重新读取"}
             # M1：估算输入接近模型上限时先裁剪，避免请求被拒。
             if self.context.estimate({"messages": messages, "tools": tools}) > self.context.hard_limit:
                 messages = self._shrink(messages)
+                records = []
                 self.turns.clear()
-                yield {"type": "context_trimmed", "reason": "输入接近模型上限，已移除历史并缩短工具结果"}
+                yield {"type": "context_trimmed", "scope": "history", "reason": "输入接近模型上限，已移除历史并缩短工具结果"}
             request = self._request(messages, tools, force_answer, max_tokens, extra_body)
             try:
                 result = yield from self._stream_round(request, usage, should_stop)
@@ -267,8 +327,9 @@ class CodeChatAgent(FunctionCallAgent):
                     raise
                 logger.warning("输入超长，裁剪后重试：%s", exc)
                 messages = self._shrink(messages)
+                records = []
                 self.turns.clear()
-                yield {"type": "context_trimmed", "reason": "超出模型输入上限，已移除历史并缩短工具结果后重试"}
+                yield {"type": "context_trimmed", "scope": "history", "reason": "超出模型输入上限，已移除历史并缩短工具结果后重试"}
                 request = self._request(messages, tools, force_answer, max_tokens, extra_body)
                 result = yield from self._stream_round(request, usage, should_stop)
             if result is None:
@@ -298,9 +359,12 @@ class CodeChatAgent(FunctionCallAgent):
                 output = self._execute_tool_call(call["name"], arguments)
                 logger.info("工具 %s %s → %d 字符", call["name"], shown, len(output))
                 yield {"type": "tool_end", "id": call["id"], "name": call["name"], **summarize_result(output)}
-                if INVALID_ARGUMENTS not in arguments:
-                    trace.append(describe_call(call["name"], arguments))
                 messages.append({"role": "tool", "tool_call_id": call["id"], "name": call["name"], "content": output})
+                if INVALID_ARGUMENTS not in arguments:
+                    label = describe_call(call["name"], arguments)
+                    trace.append(label)
+                    records.append(ToolRecord(len(messages) - 1, label))
+            cleared_total += dedupe_tool_results(messages, records)
 
         trimmed = 0
         if answer.strip():
@@ -318,6 +382,7 @@ class CodeChatAgent(FunctionCallAgent):
             "history_turns": len(self.turns),
             "history_tokens": self._history_tokens(),
             "trimmed_turns": trimmed,
+            "cleared_tool_results": cleared_total,
             "tokens_per_char": round(self.context.tokens_per_char, 4),
         }
         logger.info("本轮用量 %s，上下文 %s", usage, context)

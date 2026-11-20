@@ -227,6 +227,41 @@ class ChatAgentTests(unittest.TestCase):
         self.assertEqual(events[0]["type"], "context_trimmed")
         self.assertEqual(len(completions.requests), 1)
 
+    def test_repeated_call_keeps_only_latest_result(self):
+        """M2：同一文件的同一行范围被重复读取时，只保留最新一次内容。"""
+        read = json.dumps({"path": "app.py", "start": 1, "end": 2})
+        completions = self.use(tool_round(("c1", "read_file", read)), tool_round(("c2", "read_file", read)),
+                               [chunk("回答")])
+        done = self.events()[-1]
+        first, second = self.tool_messages(completions.requests[2])
+        self.assertTrue(first["content"].startswith("[已清理：后文重新执行了相同调用（读取了 app.py:1-2）"))
+        self.assertIn("1: x = foo(a, b)", second["content"])
+        self.assertEqual(first["tool_call_id"], "c1")
+        self.assertEqual(done["context"]["cleared_tool_results"], 1)
+
+    def test_old_tool_results_cleared_over_60_percent_of_budget(self):
+        """M2：本轮占用超过预算 60% 时清理较早的工具结果，保留最近 3 条原文和全部工具调用。"""
+        root = Path(self.temp.name)
+        (root / "big.py").write_text("".join(f"value_{i} = {'x' * 40}\n" for i in range(500)), encoding="utf-8")
+        self.agent.context = ContextBudget(budget=8000, max_input=991808)
+        reads = [tool_round((f"c{i}", "read_file", json.dumps({"path": "big.py", "start": i * 100 + 1,
+                                                               "end": i * 100 + 100}))) for i in range(5)]
+        completions = self.use(*reads, [chunk("回答")])
+        events = self.events()
+        cleared = [e for e in events if e["type"] == "context_trimmed"]
+        self.assertTrue(cleared)
+        self.assertTrue(all(e["scope"] == "tool_results" for e in cleared))
+        last = completions.requests[-1]["messages"]
+        results = self.tool_messages(completions.requests[-1])
+        self.assertEqual([r["content"].startswith("[已清理") for r in results], [True, True, False, False, False])
+        self.assertIn("此前读取了 big.py:1-100", results[0]["content"])
+        self.assertIn("value_499", results[-1]["content"])
+        # 工具调用与结果仍一一配对。
+        call_ids = [c["id"] for m in last if m["role"] == "assistant" and m.get("tool_calls") for c in m["tool_calls"]]
+        self.assertEqual(call_ids, [r["tool_call_id"] for r in results])
+        self.assertEqual(events[-1]["context"]["cleared_tool_results"], 2)
+        self.assertEqual(self.agent.turns[-1].tool_summary.count("读取了 big.py"), 5)
+
     def test_stop_ends_turn_without_recording_history(self):
         completions = self.use([chunk("一"), chunk("二"), chunk("三")])
         seen = []
