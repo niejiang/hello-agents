@@ -1,4 +1,5 @@
 """验证网页会话绑定和消息接口。"""
+import json
 import sys
 import tempfile
 import unittest
@@ -14,9 +15,22 @@ class FakeAgent:
     def __init__(self):
         self.history = []
 
-    def run(self, question, **kwargs):
+    def run_stream(self, question, **kwargs):
         self.history.append(question)
-        return '|'.join(self.history)
+        answer = '|'.join(self.history)
+        yield {'type': 'tool_start', 'id': 'c1', 'name': 'list_files', 'arguments': {}}
+        yield {'type': 'tool_end', 'id': 'c1', 'name': 'list_files', 'ok': True, 'summary': 'a.py', 'lines': 1,
+               'chars': 4, 'truncated': False}
+        yield {'type': 'text_delta', 'text': answer}
+        yield {'type': 'done', 'answer': answer, 'usage': {}, 'context': {}}
+
+
+def parse_sse(text):
+    events = []
+    for block in text.strip().split('\n\n'):
+        lines = dict(line.split(': ', 1) for line in block.splitlines())
+        events.append((lines['event'], json.loads(lines['data'])))
+    return events
 
 
 class WebChatTests(unittest.TestCase):
@@ -49,8 +63,33 @@ class WebChatTests(unittest.TestCase):
 
     def test_empty_answer_returns_502(self):
         session_id = self.create()['session_id']
-        with patch.object(FakeAgent, 'run', return_value='  '):
+        empty = lambda self, question, **kwargs: iter([{'type': 'done', 'answer': '  ', 'usage': {}, 'context': {}}])
+        with patch.object(FakeAgent, 'run_stream', empty):
             self.assertEqual(self.send(session_id, 'hi').status_code, 502)
+
+    def test_stream_endpoint_sends_sse_events(self):
+        session_id = self.create()['session_id']
+        response = self.client.post(f'/api/sessions/{session_id}/messages/stream', json={'message': '一'})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.headers['content-type'].startswith('text/event-stream'))
+        events = parse_sse(response.text)
+        self.assertEqual([name for name, _ in events], ['start', 'tool_start', 'tool_end', 'text_delta', 'done'])
+        self.assertEqual(events[-1][1]['answer'], '一')
+        # 流结束后会话可继续使用，并保留历史。
+        self.assertEqual(self.send(session_id, '二').json()['content'][0]['text'], '一|二')
+
+    def test_stream_endpoint_rejects_busy_session(self):
+        session_id = self.create()['session_id']
+        session = store.get(session_id)
+        session._lock.acquire()
+        try:
+            busy = self.client.post(f'/api/sessions/{session_id}/messages/stream', json={'message': 'hi'})
+            self.assertEqual(busy.status_code, 409)
+            self.assertEqual(self.send(session_id, 'hi').status_code, 409)
+        finally:
+            session._lock.release()
+        missing = self.client.post('/api/sessions/missing/messages/stream', json={'message': 'hi'})
+        self.assertEqual(missing.status_code, 404)
 
     def test_delete_and_evict_sessions(self):
         created = self.create()

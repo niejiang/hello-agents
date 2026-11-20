@@ -16,6 +16,15 @@ from app.services.chat_service import CodeChatSession, open_project
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+def format_arguments(arguments: object) -> str:
+    """把工具参数显示为一行简短文本。"""
+    if isinstance(arguments, dict):
+        text = ", ".join(f"{key}={value}" for key, value in arguments.items())
+    else:
+        text = str(arguments)
+    return text if len(text) <= 120 else text[:117] + "..."
+
+
 def main() -> int:
     """加载配置并启动单轮问答或交互式多轮对话。"""
     load_dotenv(PROJECT_ROOT / ".env")
@@ -36,13 +45,39 @@ def main() -> int:
         return 1
 
     def reply(question: str) -> bool:
-        """复用同一个会话回答，保留当前进程中的对话历史。"""
+        """复用同一个会话回答，逐段打印回答和工具调用，保留当前进程中的对话历史。"""
+        print("\n助手：", end="", flush=True)
+        at_line_start = False
         try:
-            answer = session.ask(question)
+            for event in session.ask_stream(question):
+                kind = event["type"]
+                if kind == "text_delta":
+                    print(event["text"], end="", flush=True)
+                    at_line_start = event["text"].endswith("\n")
+                elif kind == "tool_start":
+                    prefix = "" if at_line_start else "\n"
+                    print(f"{prefix}  · {event['name']} {format_arguments(event['arguments'])}", end="", flush=True)
+                elif kind == "tool_end":
+                    status = "✓" if event["ok"] else "✗"
+                    print(f" → {status} {event['lines']} 行", flush=True)
+                    at_line_start = True
+                elif kind == "context_trimmed":
+                    print(f"\n  （{event['reason']}）", flush=True)
+                    at_line_start = True
+                elif kind == "error":
+                    print(f"\n请求失败：{event['message']}", file=sys.stderr)
+                    return False
+                elif kind == "done":
+                    context = event["context"]
+                    usage = event["usage"]
+                    print(
+                        f"\n\n  （输入 {usage['last_prompt_tokens'] or '—'} token，"
+                        f"预算占用 {context['budget_percent']}%，请求 {usage['requests']} 次）\n",
+                        flush=True,
+                    )
         except Exception as exc:
-            print(f"请求失败：{exc}", file=sys.stderr)
+            print(f"\n请求失败：{exc}", file=sys.stderr)
             return False
-        print(f"\n助手：{answer}\n")
         return True
 
     # 命令行附带问题时只回答一次；不附带问题则持续接收输入。

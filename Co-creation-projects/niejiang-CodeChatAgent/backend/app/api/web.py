@@ -1,14 +1,15 @@
 """本机 Web 聊天接口：只负责 HTTP 层，会话与问答逻辑在 services 中。"""
+import json
 import logging
 from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field, field_validator
 
-from app.services.chat_service import ProjectPathError, open_project
+from app.services.chat_service import ProjectPathError, SessionBusyError, open_project
 from app.services.session_store import SessionStore
 
 load_dotenv(Path(__file__).resolve().parents[3] / '.env')
@@ -63,14 +64,45 @@ def delete_session(session_id: str):
     store.delete(session_id)
 
 
-@app.post('/api/sessions/{session_id}/messages')
-def send_message(session_id: str, body: MessageRequest):
+def require_session(session_id: str):
     session = store.get(session_id)
     if session is None:
         raise HTTPException(status_code=404, detail='会话不存在，请重新创建')
+    return session
+
+
+@app.post('/api/sessions/{session_id}/messages')
+def send_message(session_id: str, body: MessageRequest):
+    session = require_session(session_id)
     try:
         answer = session.ask(body.message)
+    except SessionBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
     except Exception:
         logger.exception('对话请求失败')
         raise HTTPException(status_code=502, detail='模型请求失败，请稍后重试')
     return {'content': [{'type': 'text', 'text': answer}]}
+
+
+def to_sse(event: dict) -> str:
+    return f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+@app.post('/api/sessions/{session_id}/messages/stream')
+def stream_message(session_id: str, body: MessageRequest):
+    """以 SSE 逐条推送回答事件；客户端断开时停止迭代，会话锁随之释放。"""
+    session = require_session(session_id)
+    try:
+        events = session.ask_stream(body.message)
+    except SessionBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+
+    def body_stream():
+        try:
+            for event in events:
+                yield to_sse(event)
+        finally:
+            events.close()
+
+    return StreamingResponse(body_stream(), media_type='text/event-stream',
+                             headers={'Cache-Control': 'no-cache', 'X-Accel-Buffering': 'no'})

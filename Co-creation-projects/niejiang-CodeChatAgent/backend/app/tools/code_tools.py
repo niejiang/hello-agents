@@ -205,7 +205,6 @@ class CodeTool(Tool):
 
     def run(self, parameters: dict[str, Any]) -> str:
         """执行工具并将参数或文件错误转换成模型可读的结果。"""
-        print(f"\n[工具] {self.name}：{parameters}", flush=True)
         try:
             result = self.operation(**parameters)
         except (ValueError, TypeError, OSError, UnicodeError) as exc:

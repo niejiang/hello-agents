@@ -1,4 +1,4 @@
-"""用模拟的模型客户端验证原生工具调用流程，不访问真实模型服务。"""
+"""用模拟的流式模型客户端验证工具调用循环、事件和上下文预算，不访问真实模型服务。"""
 
 import json
 import sys
@@ -8,31 +8,71 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
+import openai
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
-from app.agents.chat_agent import create_chat_agent
+from app.agents.chat_agent import ContextBudget, create_chat_agent
 
-ENV = {"LLM_MODEL_ID": "test-model", "LLM_API_KEY": "test-key", "LLM_BASE_URL": "http://127.0.0.1:9/v1"}
+ENV = {
+    "LLM_MODEL_ID": "test-model", "LLM_API_KEY": "test-key", "LLM_BASE_URL": "http://127.0.0.1:9/v1",
+    "LLM_MAX_INPUT_TOKENS": "991808", "LLM_CONTEXT_BUDGET": "128000",
+}
 
 
-def tool_call(call_id, name, arguments):
-    return SimpleNamespace(id=call_id, type="function", function=SimpleNamespace(name=name, arguments=arguments))
+def chunk(content=None, tool_calls=None):
+    delta = SimpleNamespace(content=content, tool_calls=tool_calls)
+    return SimpleNamespace(choices=[SimpleNamespace(delta=delta)], usage=None)
 
 
-def reply(content="", tool_calls=None):
-    message = SimpleNamespace(content=content, tool_calls=tool_calls)
-    return SimpleNamespace(choices=[SimpleNamespace(message=message)])
+def call_delta(index, call_id=None, name=None, arguments=None):
+    return SimpleNamespace(index=index, id=call_id, function=SimpleNamespace(name=name, arguments=arguments))
+
+
+def tool_round(*calls):
+    """一轮只包含工具调用：calls 为 (id, name, arguments)。"""
+    return [chunk(tool_calls=[call_delta(i, call_id, name, arguments)]) for i, (call_id, name, arguments) in enumerate(calls)]
+
+
+def usage_chunk(prompt_tokens, completion_tokens=5, cached_tokens=0):
+    usage = SimpleNamespace(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+                            prompt_tokens_details=SimpleNamespace(cached_tokens=cached_tokens))
+    return SimpleNamespace(choices=[], usage=usage)
+
+
+def overflow_error():
+    response = httpx.Response(400, request=httpx.Request("POST", "http://127.0.0.1:9/v1/chat/completions"))
+    return openai.BadRequestError("Range of input length should be [1, 991808]", response=response, body=None)
+
+
+class FakeStream:
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.closed = False
+
+    def __iter__(self):
+        return iter(self.chunks)
+
+    def close(self):
+        self.closed = True
 
 
 class FakeCompletions:
-    """按顺序返回预设响应，并记录每次请求的参数。"""
+    """按顺序返回预设的流式响应（或抛出预设异常），并记录每次请求。"""
 
-    def __init__(self, responses):
-        self.responses = list(responses)
+    def __init__(self, rounds):
+        self.rounds = list(rounds)
         self.requests = []
+        self.streams = []
 
     def create(self, **kwargs):
-        self.requests.append(json.loads(json.dumps(kwargs, default=str)))
-        return self.responses.pop(0)
+        self.requests.append(json.loads(json.dumps(kwargs, ensure_ascii=False, default=str)))
+        current = self.rounds.pop(0)
+        if isinstance(current, Exception):
+            raise current
+        stream = FakeStream(current)
+        self.streams.append(stream)
+        return stream
 
 
 class ChatAgentTests(unittest.TestCase):
@@ -44,91 +84,177 @@ class ChatAgentTests(unittest.TestCase):
         with patch.dict("os.environ", ENV):
             self.agent = create_chat_agent(root)
 
-    def use(self, *responses):
-        completions = FakeCompletions(responses)
+    def use(self, *rounds):
+        completions = FakeCompletions(rounds)
         self.agent.llm._client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
         return completions
 
-    def run_agent(self, question="问题", **kwargs):
-        with patch("builtins.print"):
-            return self.agent.run(question, max_tool_iterations=kwargs.pop("iterations", 6),
-                                  max_tokens=1024, extra_body={"enable_thinking": False})
+    def events(self, question="问题", iterations=6, should_stop=None):
+        return list(self.agent.run_stream(question, max_tool_iterations=iterations, max_tokens=4096,
+                                          extra_body={"enable_thinking": False}, should_stop=should_stop))
 
-    def tool_messages(self, request):
+    @staticmethod
+    def tool_messages(request):
         return [m for m in request["messages"] if m["role"] == "tool"]
 
-    def test_arguments_with_commas_and_brackets_reach_tool_intact(self):
-        """文字协议会把 foo(a, b) 截成 foo(a；原生调用应完整传入。"""
+    def test_streams_text_and_assembles_split_parallel_tool_calls(self):
+        """参数分多块返回、两个调用交错到达时，按 index 拼接，特殊字符完整保留。"""
         completions = self.use(
-            reply(tool_calls=[
-                tool_call("c1", "search_code", json.dumps({"query": "foo(a, b)"})),
-                tool_call("c2", "search_code", json.dumps({"query": "items[0]"})),
-            ]),
-            reply("找到了"),
+            [
+                chunk("我先搜索。"),
+                chunk(tool_calls=[call_delta(0, "c1", "search_code", '{"query": "foo')]),
+                chunk(tool_calls=[call_delta(1, "c2", "search_code", '{"query":')]),
+                chunk(tool_calls=[call_delta(0, None, None, '(a, b)"}')]),
+                chunk(tool_calls=[call_delta(1, None, None, ' "items[0]"}')]),
+            ],
+            [chunk("找到"), chunk("了")],
         )
-        self.assertEqual(self.run_agent(), "找到了")
+        events = self.events()
+        kinds = [e["type"] for e in events]
+        self.assertEqual(kinds, ["text_delta", "tool_start", "tool_end", "tool_start", "tool_end",
+                                 "text_delta", "text_delta", "done"])
+        self.assertEqual(events[1]["arguments"], {"query": "foo(a, b)"})
+        self.assertEqual(events[3]["arguments"], {"query": "items[0]"})
+        self.assertTrue(events[2]["ok"])
+        self.assertEqual(events[-1]["answer"], "找到了")
         results = self.tool_messages(completions.requests[1])
         self.assertEqual([m["tool_call_id"] for m in results], ["c1", "c2"])
         self.assertIn("app.py:1: x = foo(a, b)", results[0]["content"])
         self.assertIn("app.py:2: items[0] = 1", results[1]["content"])
+        self.assertTrue(all(stream.closed for stream in completions.streams))
 
-    def test_request_uses_strict_schemas_and_passes_options(self):
-        completions = self.use(reply("你好"))
-        self.run_agent()
+    def test_request_uses_streaming_strict_schemas_and_options(self):
+        completions = self.use([chunk("你好")])
+        self.events()
         request = completions.requests[0]
+        self.assertTrue(request["stream"])
+        self.assertEqual(request["stream_options"], {"include_usage": True})
         schemas = {tool["function"]["name"]: tool["function"]["parameters"] for tool in request["tools"]}
         self.assertEqual(set(schemas), {"list_files", "search_code", "read_file"})
-        for schema in schemas.values():
-            self.assertFalse(schema["additionalProperties"])
-        self.assertEqual(schemas["read_file"]["required"], ["path"])
+        self.assertTrue(all(schema["additionalProperties"] is False for schema in schemas.values()))
         self.assertEqual(schemas["read_file"]["properties"]["start"]["minimum"], 1)
         self.assertEqual(request["tool_choice"], "auto")
-        self.assertEqual(request["max_tokens"], 1024)
+        self.assertEqual(request["max_tokens"], 4096)
         self.assertEqual(request["extra_body"], {"enable_thinking": False})
 
     def test_invalid_json_arguments_are_reported_to_model(self):
         completions = self.use(
-            reply(tool_calls=[tool_call("c1", "read_file", '{"path": "app.py",')]),
-            reply(tool_calls=[tool_call("c2", "read_file", '{"path": "app.py", "start": 1, "end": 1}')]),
-            reply("第 1 行是赋值"),
+            tool_round(("c1", "read_file", '{"path": "app.py",')),
+            tool_round(("c2", "read_file", '{"path": "app.py", "start": 1, "end": 1}')),
+            [chunk("第 1 行是赋值")],
         )
-        self.assertEqual(self.run_agent(), "第 1 行是赋值")
-        first = self.tool_messages(completions.requests[1])[0]["content"]
-        self.assertIn("参数不是合法的 JSON", first)
-        second = self.tool_messages(completions.requests[2])[1]["content"]
-        self.assertIn("1: x = foo(a, b)", second)
+        events = self.events()
+        first_end = next(e for e in events if e["type"] == "tool_end")
+        self.assertFalse(first_end["ok"])
+        self.assertIn("参数不是合法的 JSON", self.tool_messages(completions.requests[1])[0]["content"])
+        self.assertIn("1: x = foo(a, b)", self.tool_messages(completions.requests[2])[1]["content"])
+        self.assertEqual(events[-1]["answer"], "第 1 行是赋值")
 
     def test_unknown_or_bad_arguments_return_tool_error(self):
         completions = self.use(
-            reply(tool_calls=[
-                tool_call("c1", "read_file", json.dumps({"path": "app.py", "line": 3})),
-                tool_call("c2", "read_file", json.dumps({"path": "../outside"})),
-            ]),
-            reply("无法读取"),
+            tool_round(("c1", "read_file", json.dumps({"path": "app.py", "line": 3})),
+                       ("c2", "read_file", json.dumps({"path": "../outside"})),
+                       ("c3", "no_such_tool", "{}")),
+            [chunk("无法读取")],
         )
-        self.run_agent()
-        results = [m["content"] for m in self.tool_messages(completions.requests[1])]
-        self.assertTrue(all(text.startswith("工具执行失败") for text in results), results)
+        ends = [e for e in self.events() if e["type"] == "tool_end"]
+        self.assertEqual([e["ok"] for e in ends], [False, False, False])
+        contents = [m["content"] for m in self.tool_messages(completions.requests[1])]
+        self.assertTrue(all(text.startswith("工具执行失败") for text in contents), contents)
 
     def test_iteration_limit_forces_final_answer_without_tools(self):
-        call = reply(tool_calls=[tool_call("c1", "list_files", "{}")])
-        completions = self.use(call, call, reply("根据目录给出回答"))
-        self.assertEqual(self.run_agent(iterations=2), "根据目录给出回答")
-        self.assertEqual(completions.requests[-1]["tool_choice"], "none")
+        listing = tool_round(("c1", "list_files", "{}"))
+        completions = self.use(listing, listing, [chunk("根据目录给出回答")])
+        events = self.events(iterations=2)
+        self.assertEqual(events[-1]["answer"], "根据目录给出回答")
+        self.assertEqual([r["tool_choice"] for r in completions.requests], ["auto", "auto", "none"])
 
-    def test_history_kept_across_turns(self):
-        completions = self.use(reply("第一轮回答"), reply("第二轮回答"))
-        self.run_agent("第一问")
-        self.run_agent("第二问")
-        contents = [m["content"] for m in completions.requests[1]["messages"]]
-        self.assertIn("第一问", contents)
-        self.assertIn("第一轮回答", contents)
-        self.assertEqual(contents[-1], "第二问")
+    def test_history_keeps_answer_and_tool_summary(self):
+        completions = self.use(
+            tool_round(("c1", "read_file", json.dumps({"path": "app.py", "start": 1, "end": 1}))),
+            [chunk("第一轮回答")],
+            [chunk("第二轮回答")],
+        )
+        self.events("第一问")
+        self.events("第二问")
+        messages = completions.requests[2]["messages"]
+        self.assertEqual([m["role"] for m in messages], ["system", "user", "assistant", "user"])
+        self.assertIn("[系统记录：回答本问题时读取了 app.py:1-1]", messages[1]["content"])
+        self.assertEqual(messages[2]["content"], "第一轮回答")
+        self.assertEqual(messages[3]["content"], "第二问")
+
+    def test_history_trimmed_to_half_of_budget(self):
+        """M1：历史超过工作预算的一半时，整轮删除最早的对话，至少保留最新一轮。"""
+        self.agent.context = ContextBudget(budget=200, max_input=991808)
+        long_answer = "很长的回答" * 30
+        completions = self.use([chunk(long_answer)], [chunk(long_answer)], [chunk("好")])
+        self.events("第一问")
+        done = self.events("第二问")[-1]
+        self.assertEqual(done["context"]["trimmed_turns"], 1)
+        self.assertEqual(done["context"]["history_turns"], 1)
+        self.events("第三问")
+        contents = [m["content"] for m in completions.requests[2]["messages"]]
+        self.assertNotIn("第一问", contents)
+        self.assertIn("第二问", contents)
+
+    def test_usage_is_reported_and_calibrates_estimate(self):
+        """M0：读取接口返回的用量，校准字符与 Token 的换算比例。"""
+        completions = self.use([chunk("你好"), usage_chunk(500, completion_tokens=7, cached_tokens=120)])
+        done = self.events()[-1]
+        request = completions.requests[0]
+        expected = 500 / ContextBudget.chars({"messages": request["messages"], "tools": request["tools"]})
+        self.assertAlmostEqual(self.agent.context.tokens_per_char, expected, places=6)
+        self.assertEqual(done["usage"]["last_prompt_tokens"], 500)
+        self.assertEqual(done["usage"]["completion_tokens"], 7)
+        self.assertEqual(done["usage"]["cached_tokens"], 120)
+        self.assertEqual(done["usage"]["requests"], 1)
+        self.assertEqual(done["context"]["budget_percent"], round(100 * 500 / 128000, 1))
+
+    def test_context_overflow_drops_history_and_retries_once(self):
+        completions = self.use([chunk("第一轮回答")], overflow_error(), [chunk("重试成功")])
+        self.events("第一问")
+        events = self.events("第二问")
+        self.assertIn("context_trimmed", [e["type"] for e in events])
+        self.assertEqual(events[-1]["answer"], "重试成功")
+        retry = [m["content"] for m in completions.requests[-1]["messages"]]
+        self.assertNotIn("第一问", retry)
+        self.assertEqual(retry[-1], "第二问")
+
+    def test_hard_limit_trims_before_request(self):
+        self.agent.context = ContextBudget(budget=100, max_input=100)
+        completions = self.use([chunk("回答")])
+        events = self.events("问题" * 200)
+        self.assertEqual(events[0]["type"], "context_trimmed")
+        self.assertEqual(len(completions.requests), 1)
+
+    def test_stop_ends_turn_without_recording_history(self):
+        completions = self.use([chunk("一"), chunk("二"), chunk("三")])
+        seen = []
+
+        def should_stop():
+            return len(seen) >= 1
+
+        events = []
+        for event in self.agent.run_stream("问题", should_stop=should_stop):
+            events.append(event)
+            if event["type"] == "text_delta":
+                seen.append(event)
+        self.assertEqual([e["type"] for e in events], ["text_delta", "stopped"])
+        self.assertEqual(self.agent.turns, [])
+        self.assertTrue(completions.streams[0].closed)
 
     def test_without_project_has_no_tools(self):
         with patch.dict("os.environ", ENV):
             agent = create_chat_agent(None)
         self.assertEqual(agent._build_tool_schemas(), [])
+
+    def test_context_settings_are_required(self):
+        for override, message in (({"LLM_CONTEXT_BUDGET": ""}, "LLM_CONTEXT_BUDGET"),
+                                  ({"LLM_MAX_INPUT_TOKENS": "abc"}, "LLM_MAX_INPUT_TOKENS"),
+                                  ({"LLM_CONTEXT_BUDGET": "2000000"}, "不能大于")):
+            with self.subTest(override=override), patch.dict("os.environ", {**ENV, **override}):
+                with self.assertRaisesRegex(ValueError, message):
+                    create_chat_agent(None)
 
 
 if __name__ == "__main__":
