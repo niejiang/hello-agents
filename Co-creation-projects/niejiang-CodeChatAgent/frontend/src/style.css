@@ -310,6 +310,32 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .copy-code:hover { background: #30363d; color: #e6edf3; }
 .code-block pre { margin: 0; padding: 12px 14px; overflow-x: auto; }
 .code-block code.hljs { padding: 0; background: none; font-size: 13px; line-height: 1.6; white-space: pre; }
+/* 流程图：渲染成功显示图，可切换源码；失败或渲染前显示源码 */
+.code-block.diagram-block { background: var(--bg); border: 1px solid var(--border); }
+.diagram-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 5px 8px 5px 14px;
+  border-bottom: 1px solid var(--border); background: var(--surface); color: var(--muted); font-size: 12px;
+}
+.diagram-actions { display: flex; gap: 2px; }
+.diagram-actions button {
+  padding: 2px 8px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 12px;
+}
+.diagram-actions button:hover { background: var(--surface-2); color: var(--text); }
+.diagram-block:not([data-diagram="done"]) .diagram-toggle { display: none; }
+.diagram-view { display: none; padding: 16px; overflow-x: auto; text-align: center; }
+/* Mermaid 在 body 下测量文字尺寸，图中需恢复默认排版，否则继承正文的行高和断行规则后文字会被截断 */
+.markdown .diagram-view { line-height: normal; overflow-wrap: normal; word-break: normal; white-space: normal; }
+.diagram-view svg { max-width: 100%; height: auto; }
+.diagram-block[data-diagram="done"] .diagram-view { display: block; }
+.diagram-block[data-diagram="done"] .diagram-source { display: none; }
+.diagram-block[data-diagram="done"].show-source .diagram-view { display: none; }
+.diagram-block[data-diagram="done"].show-source .diagram-source { display: block; }
+.diagram-source { margin: 0; padding: 10px 14px; overflow-x: auto; background: var(--surface); }
+.diagram-source code {
+  display: block; padding: 0; background: none; font-family: var(--mono); font-size: 13px; line-height: 1.6; white-space: pre;
+}
+.diagram-error { margin: 0; padding: 6px 14px; font-size: 12px; color: #b7791f; background: #fff6e6; }
+
 /* 纯文本块：浅色背景、细边框，复制按钮悬停时显示 */
 .code-block.plain-block { position: relative; background: var(--surface); border: 1px solid var(--border); }
 .plain-block pre { padding: 10px 14px; }

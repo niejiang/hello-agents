@@ -5,6 +5,7 @@ import {
   type ChatEvent, type Conversation, type PermissionDecision, type ProjectProfile, type SessionProject,
   type StoredMessage,
 } from './api'
+import { renderDiagrams, toggleDiagram } from './diagram'
 import { projectHue, renderMarkdown } from './markdown'
 
 type ToolCall = {
@@ -164,6 +165,7 @@ async function openConversation(id: string) {
     sessionProjects.value = data.projects
     sidebarOpen.value = false
     scrollToBottom(true)
+    nextTick(() => renderDiagrams(conversation.value))
     focusComposer()
   } catch (e) {
     if (e instanceof HttpError && e.status === 404) {
@@ -392,6 +394,8 @@ async function send(preset?: string) {
     nextTick(resizeComposer)
     refreshProjects()
     refreshConversations()
+    // 回答结束后再渲染流程图，避免对不完整的源码反复渲染。
+    nextTick(() => renderDiagrams(conversation.value))
   }
 }
 
@@ -509,6 +513,8 @@ async function copyText(button: HTMLElement, text: string) {
 }
 
 function onConversationClick(event: MouseEvent) {
+  const toggle = (event.target as HTMLElement).closest<HTMLElement>('.diagram-toggle')
+  if (toggle) { toggleDiagram(toggle); return }
   const button = (event.target as HTMLElement).closest<HTMLElement>('.copy-code')
   if (!button) return
   copyText(button, button.closest('.code-block')?.querySelector('code')?.textContent ?? '')

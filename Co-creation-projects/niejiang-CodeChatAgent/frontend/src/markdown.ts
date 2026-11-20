@@ -37,6 +37,14 @@ const PLAIN_LANGUAGES = new Set(['', 'text', 'txt', 'plain', 'plaintext'])
 md.renderer.rules.fence = (tokens, idx) => {
   const token = tokens[idx]
   const lang = token.info.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
+  if (lang === 'mermaid') {
+    // 先输出源码，由 diagram.ts 在回答结束后渲染为图。
+    return `<div class="code-block diagram-block" data-diagram="pending"><div class="diagram-head"><span>流程图</span>`
+      + `<span class="diagram-actions"><button type="button" class="diagram-toggle">查看源码</button>`
+      + `<button type="button" class="copy-code">复制源码</button></span></div>`
+      + `<div class="diagram-view"></div><p class="diagram-error" hidden></p>`
+      + `<pre class="diagram-source"><code>${escape(token.content)}</code></pre></div>`
+  }
   if (PLAIN_LANGUAGES.has(lang)) {
     return `<div class="code-block plain-block"><button type="button" class="copy-code">复制</button>`
       + `<pre><code>${escape(token.content)}</code></pre></div>`
