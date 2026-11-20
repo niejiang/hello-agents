@@ -272,6 +272,19 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .copy-code:hover { background: #30363d; color: #e6edf3; }
 .code-block pre { margin: 0; padding: 12px 14px; overflow-x: auto; }
 .code-block code.hljs { padding: 0; background: none; font-size: 13px; line-height: 1.6; white-space: pre; }
+/* 纯文本块：浅色背景、细边框，复制按钮悬停时显示 */
+.code-block.plain-block { position: relative; background: var(--surface); border: 1px solid var(--border); }
+.plain-block pre { padding: 10px 14px; }
+.plain-block code {
+  display: block; padding: 0; background: none; border-radius: 0; font-family: var(--mono); font-size: 13px; line-height: 1.6;
+  color: var(--text); white-space: pre;
+}
+.plain-block .copy-code {
+  position: absolute; top: 6px; right: 6px; background: var(--bg); border: 1px solid var(--border);
+  color: var(--muted); opacity: 0; transition: opacity .15s;
+}
+.plain-block:hover .copy-code, .plain-block .copy-code:focus-visible { opacity: 1; }
+.plain-block .copy-code:hover { background: var(--surface-2); color: var(--text); }
 
 /* 输入区 */
 .composer-wrap { flex: none; padding: 8px 24px 14px; }
@@ -308,6 +321,9 @@ kbd {
 
 /* 窄屏：侧栏收为抽屉 */
 @media (max-width: 768px) {
+  /* 触屏没有悬停，复制按钮常显，内容下移避免被遮挡 */
+  .plain-block .copy-code { opacity: 1; }
+  .plain-block pre { padding-top: 36px; }
   .only-mobile { display: grid; }
   .sidebar {
     position: fixed; inset: 0 auto 0 0; z-index: 20; width: min(300px, 86vw);

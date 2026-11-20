@@ -31,9 +31,16 @@ const md = new MarkdownIt({ html: false, linkify: true, breaks: true })
 md.linkify.set({ fuzzyLink: false })
 const escape = md.utils.escapeHtml
 
+// 未标注语言的代码块多为目录结构、命令输出等纯文本，使用浅色样式，不显示语言标签。
+const PLAIN_LANGUAGES = new Set(['', 'text', 'txt', 'plain', 'plaintext'])
+
 md.renderer.rules.fence = (tokens, idx) => {
   const token = tokens[idx]
   const lang = token.info.trim().split(/\s+/)[0]?.toLowerCase() ?? ''
+  if (PLAIN_LANGUAGES.has(lang)) {
+    return `<div class="code-block plain-block"><button type="button" class="copy-code">复制</button>`
+      + `<pre><code>${escape(token.content)}</code></pre></div>`
+  }
   const code = lang && hljs.getLanguage(lang)
     ? hljs.highlight(token.content, { language: lang, ignoreIllegals: true }).value
     : escape(token.content)
