@@ -1,4 +1,6 @@
 :root {
+  /* 对话区（消息与输入框）的最大宽度，宽屏下仍保持适合阅读的行长。 */
+  --thread-width: 1040px;
   --bg: #ffffff;
   --surface: #f7f8fa;
   --surface-2: #f0f2f5;
@@ -175,7 +177,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .status.busy i { animation: pulse 1.2s infinite; }
 
 .conversation { flex: 1; overflow-y: auto; }
-.thread { max-width: 780px; margin: 0 auto; padding: 28px 24px 12px; }
+.thread { max-width: var(--thread-width); margin: 0 auto; padding: 28px 24px 12px; }
 
 /* 欢迎页 */
 .welcome { padding: 9vh 0 24px; text-align: center; }
@@ -385,7 +387,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 
 /* 输入区 */
 .composer-wrap { flex: none; padding: 8px 24px 14px; }
-.error, .composer, .hint { max-width: 732px; margin-left: auto; margin-right: auto; }
+.error, .composer, .hint { max-width: calc(var(--thread-width) - 48px); margin-left: auto; margin-right: auto; }
 .error { margin-bottom: 8px; padding: 7px 12px; border-radius: 8px; background: #fdf0ef; color: var(--danger); font-size: 13px; }
 .composer {
   display: flex; align-items: flex-end; gap: 8px; padding: 8px 8px 8px 14px;
