@@ -18,7 +18,7 @@ from hello_agents.agents import FunctionCallAgent
 from app.projects.authorized import AuthorizedProjects
 from app.projects.permissions import ALLOW, STOPPED, TIMEOUT, PermissionBroker
 from app.projects.project_set import ProjectSet
-from app.tools.code_tools import DEFAULT_READ_LINES, create_code_registry
+from app.tools.code_tools import create_code_registry, default_read_end
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +132,9 @@ def describe_call(name: str, arguments: dict[str, Any], default_project: str | N
     project = arguments.get("project") or default_project
     where = f"在 {project} 中" if project else ("在全部已打开项目中" if name == "search_code" else "")
     if name == "read_file":
-        return f"{where}读取了 {arguments.get('path', '?')}:{arguments.get('start', 1)}-{arguments.get('end', DEFAULT_READ_LINES)}"
+        start = arguments.get("start", 1)
+        end = arguments.get("end") or (default_read_end(start) if isinstance(start, int) else "?")
+        return f"{where}读取了 {arguments.get('path', '?')}:{start}-{end}"
     if name == "search_code":
         # 范围和选项不同的搜索不算重复调用（M2 去重依据此说明）。
         scope = [f"{key}={arguments[key]}" for key in ("path", "glob", "regex", "case_sensitive", "context", "output", "limit")
@@ -584,7 +586,7 @@ open_project 优先使用用户消息中写出的路径或已授权项目。其�
 1. 不知道文件在哪时，用 find_files 按文件名查找（如 *Controller.java、UserService），用 list_files 了解目录结构。
 2. 用 search_code 定位定义和调用处。关键词常见时，用 path 限定目录、glob 限定文件类型（如 *.java），或用 regex 精确匹配（如 \\bcreateOrder\\(、class\\s+OrderService）；需要先了解分布时设 output 为 files 或 count；需要看上下文时设 context。
 3. 搜索结果出现“结果已截断”时，说明还有未显示的匹配，应缩小范围后再搜，不要只依据部分结果下结论。
-4. 用 read_file 读取相关代码，一次可读较大范围（最多 500 行）；结果会给出文件总行数。
+4. 用 read_file 读取相关代码，一次可读较大范围（省略 end 时读 500 行，最多 1000 行）；结果会给出文件总行数，没读完时按提示的行范围继续读取。
 5. 概览类问题（如项目架构、业务说明、多个项目的对比）先看 README、目录结构、构建文件和入口代码，按项目、按模块概括，不要逐个页面深挖；细节留给用户追问。
 工具调用次数有限，收到“还剩 N 次”的提示后应尽快收尾。
 打开多个项目时，list_files、read_file、find_files 必须用 project 参数指定项目；search_code 省略 project 会搜索全部已打开项目。相互独立的查询可以在同一轮中同时调用多个工具，例如比较两个项目时对两边同时搜索。

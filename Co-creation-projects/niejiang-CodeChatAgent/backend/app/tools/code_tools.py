@@ -38,8 +38,9 @@ MAX_MATCH_LINE_CHARS = 500
 MAX_DIRECTORY_ENTRIES = 200
 DEFAULT_FIND_LIMIT = 100
 MAX_FIND_LIMIT = 300
-MAX_READ_LINES = 500
-DEFAULT_READ_LINES = 200
+# 单次读取上限；未指定结束行时从起始行读取 DEFAULT_READ_LINES 行，多数源文件一次即可读完。
+MAX_READ_LINES = 1000
+DEFAULT_READ_LINES = 500
 # 截断说明中最多列出的未显示文件数。
 MAX_REMAINING_FILES_LISTED = 15
 # 单次工具结果返回给模型的最大字符数，避免一次读取占满上下文。
@@ -54,6 +55,11 @@ GENERATED_FILENAMES = frozenset({
 })
 GENERATED_SUFFIXES = (".min.js", ".min.css", ".map")
 SEARCH_OUTPUTS = ("content", "files", "count")
+
+
+def default_read_end(start: int) -> int:
+    """未指定结束行时的结束行号。"""
+    return start + DEFAULT_READ_LINES - 1
 
 
 def is_blocked_name(name: str) -> bool:
@@ -295,8 +301,12 @@ class CodeWorkspace:
                     break
         return "\n".join(sorted(entries)) or "目录为空。"
 
-    def read_file(self, path: str, start: int = 1, end: int = DEFAULT_READ_LINES) -> str:
-        """读取文本文件的指定行，行号从 1 开始；支持 UTF-8 和 GB18030（GBK）编码。"""
+    def read_file(self, path: str, start: int = 1, end: int | None = None) -> str:
+        """读取文本文件的指定行，行号从 1 开始；未指定 end 时从 start 起读取 DEFAULT_READ_LINES 行。
+
+        支持 UTF-8 和 GB18030（GBK）编码。
+        """
+        end = default_read_end(start) if end is None else end
         file_path = self.path(path)
         if not file_path.is_file() or file_path.stat().st_size > MAX_FILE_SIZE:
             raise ValueError("文件不存在、不是普通文件或超过 1 MiB。")
@@ -605,7 +615,8 @@ def create_code_registry(projects: "ProjectSet") -> ToolRegistry:
             name="read_file",
             description=(
                 "读取已打开项目中文本文件（UTF-8 或 GBK/GB18030）的指定行范围（包含首尾行），返回带行号的内容和文件总行数，"
-                "每次最多 500 行。通常先用 search_code 找到行号，再读取附近代码。"
+                f"省略 end 时从 start 起读取 {DEFAULT_READ_LINES} 行，每次最多 {MAX_READ_LINES} 行。"
+                "通常先用 search_code 找到行号，再读取附近代码；结果提示“以下还有”时按提示的行范围继续读取。"
             ),
             parameters=[
                 project_parameter(),
@@ -615,8 +626,9 @@ def create_code_registry(projects: "ProjectSet") -> ToolRegistry:
                     required=False, default=1,
                 ),
                 ToolParameter(
-                    name="end", type="integer", description="结束行号，与起始行相差不超过 499",
-                    required=False, default=DEFAULT_READ_LINES,
+                    name="end", type="integer",
+                    description=f"结束行号（包含），与起始行相差不超过 {MAX_READ_LINES - 1}；省略时读取 {DEFAULT_READ_LINES} 行",
+                    required=False,
                 ),
             ],
             operation=projects.tool_read,

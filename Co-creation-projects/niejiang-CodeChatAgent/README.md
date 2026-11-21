@@ -126,7 +126,7 @@ CODECHAT_ENV_FILE=.env.deepseek .venv/bin/python -m uvicorn app.api.web:app --ap
 
 在 PyCharm 的运行配置中，可将 **参数（Parameters）** 设置为 `--project /你的项目绝对路径` 预先打开项目，也可以不设置。
 
-代码工具共 5 个：`open_project`、`list_files`、`find_files`（按文件名或路径模式查找，如 `*Controller.java`、`src/**/*.ts`）、`search_code` 和 `read_file`。`search_code` 默认按字面文本、不区分大小写搜索，可用 `path` 限定子目录、`glob` 限定文件类型、`regex` 按正则匹配、`case_sensitive` 区分大小写、`context` 附带前后 0～5 行、`output` 选择返回匹配行（content）、只列文件（files）或只统计数量（count），`limit` 控制返回数量（默认 50，最多 200）；结果被截断时会说明总匹配数、文件数和未显示的文件，提示缩小范围。`read_file` 每次最多读取 500 行，并返回文件总行数。
+代码工具共 5 个：`open_project`、`list_files`、`find_files`（按文件名或路径模式查找，如 `*Controller.java`、`src/**/*.ts`）、`search_code` 和 `read_file`。`search_code` 默认按字面文本、不区分大小写搜索，可用 `path` 限定子目录、`glob` 限定文件类型、`regex` 按正则匹配、`case_sensitive` 区分大小写、`context` 附带前后 0～5 行、`output` 选择返回匹配行（content）、只列文件（files）或只统计数量（count），`limit` 控制返回数量（默认 50，最多 200）；结果被截断时会说明总匹配数、文件数和未显示的文件，提示缩小范围。`read_file` 省略结束行时从起始行读取 500 行，每次最多 1000 行，并返回文件总行数；没读完时提示下一段的行范围。
 
 文件读取同时支持 UTF-8 和 GBK/GB18030 编码。在 Git 仓库中搜索和查找文件时遵守 `.gitignore`（通过只读的 `git ls-files`，并关闭 fsmonitor 等可能执行外部命令的配置），不是 Git 仓库或目录本身被忽略时直接遍历目录。工具始终跳过 `.git`、虚拟环境、`node_modules`、构建目录、符号链接、`.env`、`.ssh`/`.aws` 等凭据目录和常见密钥文件（名称比较不区分大小写），搜索时还跳过依赖锁文件（如 `package-lock.json`）和压缩产物（`.min.js` 等）；单次搜索最多扫描 20,000 个文件、10 秒，单文件最大 1 MiB。每个问题最多调用 60 轮工具：剩余 3 轮时提醒模型收尾；用完后要求模型根据已获取的信息直接作答，回答下方提示“已达到工具调用上限”，点击“继续分析”（或回复“继续”）可接着分析。与模型服务的连接中断、超时或服务端 5xx 时，自动重发当次请求一次（已执行的工具结果保留，不重复执行），界面显示重试提示。搜索是文本匹配，不等同于语法级调用链分析。文件名排除规则不能识别所有敏感内容：**被读取或搜索到的代码片段会发送给配置的模型服务**，请只选择允许发送的项目。
 

@@ -130,13 +130,21 @@ class SearchTests(unittest.TestCase):
         self.assertEqual(self.ws.find_files("*.py"), "未找到匹配的文件。")
 
     def test_read_file_limits_and_total_lines(self):
-        (self.root / "long.py").write_text("".join(f"line{i}\n" for i in range(1, 701)), encoding="utf-8")
-        result = self.ws.read_file("long.py", 1, 500)
-        self.assertTrue(result.startswith("文件：long.py（共 700 行）"))
+        (self.root / "long.py").write_text("".join(f"line{i}\n" for i in range(1, 1201)), encoding="utf-8")
+        # 省略 end：从起始行读取 500 行，并提示后续范围。
+        result = self.ws.read_file("long.py")
+        self.assertTrue(result.startswith("文件：long.py（共 1200 行）"))
         self.assertIn("500: line500", result)
-        self.assertIn("以下还有 200 行，可继续读取 501-700", result)
-        with self.assertRaisesRegex(ValueError, "最多读取 500 行"):
-            self.ws.read_file("long.py", 1, 501)
+        self.assertNotIn("501: line501", result)
+        self.assertIn("以下还有 700 行，可继续读取 501-1000", result)
+        # 只给 start 时从该行往后读，不再因默认结束行小于起始行而报错。
+        result = self.ws.read_file("long.py", 801)
+        self.assertIn("801: line801", result)
+        self.assertIn("1200: line1200", result)
+        self.assertNotIn("以下还有", result)
+        self.assertIn("1000: line1000", self.ws.read_file("long.py", 1, 1000))
+        with self.assertRaisesRegex(ValueError, "最多读取 1000 行"):
+            self.ws.read_file("long.py", 1, 1001)
 
     @unittest.skipUnless(shutil.which("git"), "需要 git")
     def test_gitignore_is_respected(self):

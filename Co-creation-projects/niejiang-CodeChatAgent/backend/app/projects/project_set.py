@@ -8,7 +8,7 @@ from pathlib import Path
 from app.projects.authorized import AuthorizedProjects
 from app.projects.profile import ProjectProfile, detect_profile
 from app.tools.code_tools import (
-    DEFAULT_FIND_LIMIT, DEFAULT_READ_LINES, DEFAULT_SEARCH_LIMIT, CodeWorkspace, is_blocked_name,
+    DEFAULT_FIND_LIMIT, DEFAULT_SEARCH_LIMIT, CodeWorkspace, is_blocked_name,
 )
 
 MAX_OPEN_PROJECTS = 5
@@ -293,7 +293,7 @@ class ProjectSet:
         target = self.resolve(project)
         return f"项目：{target.alias}\n{target.workspace.list_files(path)}"
 
-    def tool_read(self, path: str, start: int = 1, end: int = DEFAULT_READ_LINES, project: str | None = None) -> str:
+    def tool_read(self, path: str, start: int = 1, end: int | None = None, project: str | None = None) -> str:
         target = self.resolve(project)
         return f"项目：{target.alias}\n{target.workspace.read_file(path, start, end)}"
 
