@@ -18,7 +18,7 @@ from app.projects.project_set import ProjectSet
 
 ENV = {
     "LLM_MODEL_ID": "test-model", "LLM_API_KEY": "test-key", "LLM_BASE_URL": "http://127.0.0.1:9/v1",
-    "LLM_MAX_INPUT_TOKENS": "991808", "LLM_CONTEXT_BUDGET": "128000",
+    "LLM_MAX_INPUT_TOKENS": "991808", "LLM_CONTEXT_BUDGET": "128000", "LLM_EXTRA_BODY": '{"enable_thinking": false}',
 }
 
 
@@ -53,7 +53,11 @@ class FakeStream:
         self.closed = False
 
     def __iter__(self):
-        return iter(self.chunks)
+        # 列表中的异常表示读取到此处时连接中断。
+        for item in self.chunks:
+            if isinstance(item, Exception):
+                raise item
+            yield item
 
     def close(self):
         self.closed = True
@@ -173,6 +177,88 @@ class ChatAgentTests(unittest.TestCase):
         events = self.events(iterations=2)
         self.assertEqual(events[-1]["answer"], "根据目录给出回答")
         self.assertEqual([r["tool_choice"] for r in completions.requests], ["auto", "auto", "none"])
+        # 强制作答的请求末尾说明轮数已用完，该说明不写入历史；回答标记 limited。
+        self.assertIn("工具调用次数已用完", completions.requests[2]["messages"][-1]["content"])
+        self.assertEqual(events[-1]["limited"], 2)
+        self.assertNotIn("工具调用次数已用完", json.dumps(self.agent.turns[-1].to_messages(), ensure_ascii=False))
+
+    def test_wrap_up_reminder_when_few_rounds_remain(self):
+        listing = tool_round(("c1", "list_files", "{}"))
+        completions = self.use(*[listing] * 5, [chunk("总结")])
+        events = self.events(iterations=5)
+        self.assertEqual(events[-1]["limited"], 5)
+        # 第 1 轮后还剩 4 次，不提醒；第 2 轮后还剩 3 次，开始提醒。
+        self.assertNotIn("还剩", self.tool_messages(completions.requests[1])[-1]["content"])
+        self.assertIn("还剩 3 次", self.tool_messages(completions.requests[2])[-1]["content"])
+        self.assertIn("还剩 1 次", self.tool_messages(completions.requests[4])[-1]["content"])
+
+    def test_answer_without_limit_is_not_marked(self):
+        self.use([chunk("直接回答")])
+        self.assertNotIn("limited", self.events()[-1])
+
+    def test_pseudo_tool_call_text_is_discarded_after_limit(self):
+        listing = tool_round(("c1", "list_files", "{}"))
+        self.use(listing, [chunk('[{"function": "list_files", '), chunk('"arguments": {"path": "static/"}}]')])
+        events = self.events(iterations=1)
+        shown = "".join(e["text"] for e in events if e["type"] == "text_delta")
+        self.assertNotIn("function", shown)
+        self.assertEqual(events[-1]["answer"], "（工具调用次数已用完，尚未得出结论。）")
+        self.assertEqual(shown, events[-1]["answer"])
+        # 兜底回答仍写入历史，用户回复“继续”时模型知道查过什么。
+        self.assertEqual(self.agent.turns[-1].answer, events[-1]["answer"])
+        self.assertIn("列出了", self.agent.turns[-1].tool_summary)
+
+    def test_forced_answer_starting_with_bracket_is_still_shown(self):
+        listing = tool_round(("c1", "list_files", "{}"))
+        self.use(listing, [chunk("  [README"), chunk("](README.md) 说明了用途")])
+        events = self.events(iterations=1)
+        shown = "".join(e["text"] for e in events if e["type"] == "text_delta")
+        self.assertEqual(shown, "  [README](README.md) 说明了用途")
+        self.assertEqual(events[-1]["answer"], shown)
+
+    def test_forced_answer_streams_normally_after_plain_start(self):
+        listing = tool_round(("c1", "list_files", "{}"))
+        self.use(listing, [chunk("项目"), chunk("结构如下")])
+        deltas = [e["text"] for e in self.events(iterations=1) if e["type"] == "text_delta"]
+        self.assertEqual(deltas, ["项目", "结构如下"])
+
+    def test_retries_once_when_stream_breaks(self):
+        """流式读取中途断开时重发同一请求，已执行的工具不重复执行。"""
+        listing = tool_round(("c1", "list_files", "{}"))
+        broken = [chunk("部分"), httpx.RemoteProtocolError("peer closed connection")]
+        with patch("app.agents.chat_agent.time.sleep") as sleep:
+            completions = self.use(listing, broken, [chunk("完整回答")])
+            events = self.events()
+        kinds = [e["type"] for e in events]
+        self.assertEqual(kinds, ["tool_start", "tool_end", "text_delta", "retrying", "text_delta", "done"])
+        self.assertEqual(events[-1]["answer"], "完整回答")
+        self.assertEqual(completions.requests[1], completions.requests[2])
+        self.assertEqual(len(self.tool_messages(completions.requests[2])), 1)
+        self.assertTrue(completions.streams[1].closed)
+        sleep.assert_called_once()
+
+    def test_retries_connection_error_before_stream(self):
+        request = httpx.Request("POST", "http://127.0.0.1:9/v1/chat/completions")
+        with patch("app.agents.chat_agent.time.sleep"):
+            self.use(openai.APIConnectionError(request=request), [chunk("好")])
+            events = self.events()
+        self.assertEqual([e["type"] for e in events], ["retrying", "text_delta", "done"])
+
+    def test_gives_up_after_one_retry(self):
+        broken = [httpx.RemoteProtocolError("peer closed connection")]
+        with patch("app.agents.chat_agent.time.sleep"):
+            self.use(broken, broken)
+            with self.assertRaises(httpx.RemoteProtocolError):
+                self.events()
+
+    def test_no_retry_after_stop(self):
+        broken = [httpx.RemoteProtocolError("peer closed connection")]
+        with patch("app.agents.chat_agent.time.sleep") as sleep:
+            completions = self.use(broken, [chunk("不应请求")])
+            events = self.events(should_stop=lambda: True)
+        self.assertEqual([e["type"] for e in events], ["stopped"])
+        self.assertEqual(len(completions.requests), 1)
+        sleep.assert_not_called()
 
     def test_history_keeps_answer_and_tool_summary(self):
         completions = self.use(
@@ -308,7 +394,9 @@ class ChatAgentTests(unittest.TestCase):
     def test_context_settings_are_required(self):
         for override, message in (({"LLM_CONTEXT_BUDGET": ""}, "LLM_CONTEXT_BUDGET"),
                                   ({"LLM_MAX_INPUT_TOKENS": "abc"}, "LLM_MAX_INPUT_TOKENS"),
-                                  ({"LLM_CONTEXT_BUDGET": "2000000"}, "不能大于")):
+                                  ({"LLM_CONTEXT_BUDGET": "2000000"}, "不能大于"),
+                                  ({"LLM_EXTRA_BODY": ""}, "LLM_EXTRA_BODY"),
+                                  ({"LLM_EXTRA_BODY": "[1]"}, "LLM_EXTRA_BODY")):
             with self.subTest(override=override), patch.dict("os.environ", {**ENV, **override}):
                 with self.assertRaisesRegex(ValueError, message):
                     create_chat_agent(None)

@@ -3,7 +3,7 @@
 import logging
 import threading
 from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,8 +15,9 @@ from app.storage.chat_store import ChatStore, StoredTurn
 
 logger = logging.getLogger(__name__)
 
-# 每个问题最多的工具调用轮数；上下文增长由 M2 清理旧工具结果兜底。
-MAX_TOOL_ITERATIONS = 15
+# 每个问题最多的工具调用轮数，作为防止失控和控制费用的安全阀；上下文增长由 M1/M2 兜底。
+# 用完后强制作答，回答标记 limited，用户可回复“继续”接着分析。
+MAX_TOOL_ITERATIONS = 60
 MAX_ANSWER_TOKENS = 4096
 # 已授权项目清单保存在本机，不提交到仓库（见 .gitignore 中的 data/）。
 AUTHORIZED_PROJECTS_FILE = Path(__file__).resolve().parents[3] / "data" / "authorized_projects.json"
@@ -53,15 +54,10 @@ class ChatOptions:
 
     max_tool_iterations: int = MAX_TOOL_ITERATIONS
     max_tokens: int = MAX_ANSWER_TOKENS
-    # 百炼兼容接口参数：关闭思考模式；切换其他模型服务时可能需要调整。
-    extra_body: dict[str, Any] = field(default_factory=lambda: {"enable_thinking": False})
+    # 模型服务的专有参数（如关闭思考模式）由配置 LLM_EXTRA_BODY 提供，见 create_chat_agent。
 
     def run_kwargs(self) -> dict[str, Any]:
-        return {
-            "max_tool_iterations": self.max_tool_iterations,
-            "max_tokens": self.max_tokens,
-            "extra_body": dict(self.extra_body),
-        }
+        return {"max_tool_iterations": self.max_tool_iterations, "max_tokens": self.max_tokens}
 
 
 def open_project(path: str | Path) -> Path:

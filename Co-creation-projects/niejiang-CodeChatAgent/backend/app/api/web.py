@@ -1,21 +1,21 @@
 """本机 Web 聊天接口：只负责 HTTP 层，会话与问答逻辑在 services 中。"""
 import json
 import logging
-from pathlib import Path
 
-from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import iterate_in_threadpool
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from pydantic import BaseModel, Field, field_validator
 
+from app.config import load_env
 from app.projects.project_set import ProjectAccessError
 from app.services import chat_service
 from app.services.chat_service import ProjectPathError, SessionBusyError, open_project
 from app.services.session_store import SessionStore
 
-load_dotenv(Path(__file__).resolve().parents[3] / '.env')
+# 默认读取项目根目录的 .env；设置 CODECHAT_ENV_FILE=.env.deepseek 等可切换模型服务。
+load_env()
 logger = logging.getLogger(__name__)
 app = FastAPI(title='CodeChatAgent')
 app.add_middleware(TrustedHostMiddleware, allowed_hosts=['127.0.0.1', 'localhost', 'testserver'])

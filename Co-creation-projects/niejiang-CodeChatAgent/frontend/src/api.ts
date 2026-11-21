@@ -6,12 +6,14 @@ export type ChatEvent =
   | { type: 'tool_start'; id: string; name: string; arguments: unknown }
   | { type: 'tool_end'; id: string; name: string; ok: boolean; summary: string; lines: number; truncated: boolean }
   | { type: 'context_trimmed'; reason: string; scope?: 'history' | 'tool_results'; count?: number }
+  | { type: 'retrying'; reason: string; attempt: number }
   | ({ type: 'project_opened' } & ProjectProfile)
   | { type: 'permission_request'; id: string; tool_call_id: string; path: string; timeout: number }
   | { type: 'permission_resolved'; id: string; decision: PermissionDecision }
   | { type: 'stopped' }
   | { type: 'error'; code: string; message: string }
-  | { type: 'done'; answer: string; usage: Usage; context: ContextInfo }
+  // limited：达到工具调用上限后强制作答时为上限轮数。
+  | { type: 'done'; answer: string; usage: Usage; context: ContextInfo; limited?: number }
 
 export type PermissionDecision = 'allow' | 'deny' | 'timeout' | 'stopped'
 export type ProjectProfile = { name: string; path: string; stack: string[]; title: string; summary: string; top_directories: string[] }

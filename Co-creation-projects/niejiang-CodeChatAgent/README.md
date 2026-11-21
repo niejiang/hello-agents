@@ -77,16 +77,28 @@ python3 -m venv .venv
 cp .env.example .env
 ```
 
-`.env` 包含密钥，已加入 Git 忽略规则。当前调用传入了百炼的 `enable_thinking: false` 参数，切换其他模型服务时可能需要调整。
+`.env` 包含密钥，已加入 Git 忽略规则（`.env.*` 同样忽略，`.env.example` 除外）。配置项均需填写实际值，缺失或无效时程序会拒绝启动：
 
-`.env` 还需要两项上下文配置，缺失或无效时程序会拒绝启动：
+- `LLM_MODEL_ID`、`LLM_API_KEY`、`LLM_BASE_URL`：OpenAI 兼容接口的模型、密钥和地址。
+- `LLM_EXTRA_BODY`：随请求发送的模型服务专有参数（JSON 对象），不需要时填 `{}`。本项目不回传思考内容（`reasoning_content`），请关闭思考模式：百炼填 `{"enable_thinking": false}`，DeepSeek 填 `{"thinking": {"type": "disabled"}}`。
+- `LLM_MAX_INPUT_TOKENS`：模型最大输入长度，作为硬上限兜底。
+- `LLM_CONTEXT_BUDGET`：实际工作预算，当前取 128000。工具循环每轮都会重发整个上下文，预算决定单次请求的最高输入成本。
 
-- `LLM_MAX_INPUT_TOKENS`：模型最大输入长度，作为硬上限兜底；`qwen4-max`（北京区域、非思考模式）为 991808。
-- `LLM_CONTEXT_BUDGET`：实际工作预算，当前取 128000。`qwen4-max` 北京区域输入 10 元、输出 30 元、缓存命中 0.5 元（每百万 Token，不分档）；工具循环每轮都会重发整个上下文，预算决定单次请求的最高输入成本（128K 约 1.28 元，命中缓存的部分按 5% 计价）。
+默认模型为百炼的 `qwen3.7-plus`：输入不超过 256K 时每百万 Token 输入 2 元、输出 8 元，隐式缓存命中按输入价的 20% 计；128K 预算始终处于第一档。此前使用的 `qwen4-max` 为输入 10 元、输出 30 元。价格以百炼控制台为准。
 
-`qwen4-max` 默认开启思考模式，本项目通过 `extra_body={"enable_thinking": False}` 关闭（见 `backend/app/services/chat_service.py` 的 `ChatOptions`）；关闭后无需回传 `reasoning_content`，工具调用的 `tool_choice` 使用 `auto` / `none`。
+### 切换模型服务
 
-更换模型时，按百炼模型列表更新这两项。每轮回答结束时，命令行会显示本轮输入 Token 数和预算占用比例。
+为每个模型服务各建一个配置文件，启动时指定：
+
+```bash
+cp .env.example .env.deepseek   # 按文件末尾的 DeepSeek 示例修改
+CODECHAT_ENV_FILE=.env.deepseek .venv/bin/python -m uvicorn app.api.web:app --app-dir backend --port 8018
+.venv/bin/python backend/main.py --env-file .env.deepseek
+```
+
+未指定时读取 `.env`。相对路径按项目根目录解析。
+
+每轮回答结束时，命令行会显示本轮输入 Token 数和预算占用比例。
 
 ## 分析本地项目
 
@@ -116,7 +128,7 @@ cp .env.example .env
 
 代码工具共 5 个：`open_project`、`list_files`、`find_files`（按文件名或路径模式查找，如 `*Controller.java`、`src/**/*.ts`）、`search_code` 和 `read_file`。`search_code` 默认按字面文本、不区分大小写搜索，可用 `path` 限定子目录、`glob` 限定文件类型、`regex` 按正则匹配、`case_sensitive` 区分大小写、`context` 附带前后 0～5 行、`output` 选择返回匹配行（content）、只列文件（files）或只统计数量（count），`limit` 控制返回数量（默认 50，最多 200）；结果被截断时会说明总匹配数、文件数和未显示的文件，提示缩小范围。`read_file` 每次最多读取 500 行，并返回文件总行数。
 
-文件读取同时支持 UTF-8 和 GBK/GB18030 编码。在 Git 仓库中搜索和查找文件时遵守 `.gitignore`（通过只读的 `git ls-files`，并关闭 fsmonitor 等可能执行外部命令的配置），不是 Git 仓库或目录本身被忽略时直接遍历目录。工具始终跳过 `.git`、虚拟环境、`node_modules`、构建目录、符号链接、`.env`、`.ssh`/`.aws` 等凭据目录和常见密钥文件（名称比较不区分大小写），搜索时还跳过依赖锁文件（如 `package-lock.json`）和压缩产物（`.min.js` 等）；单次搜索最多扫描 20,000 个文件、10 秒，单文件最大 1 MiB。每个问题最多调用 15 轮工具。搜索是文本匹配，不等同于语法级调用链分析。文件名排除规则不能识别所有敏感内容：**被读取或搜索到的代码片段会发送给配置的模型服务**，请只选择允许发送的项目。
+文件读取同时支持 UTF-8 和 GBK/GB18030 编码。在 Git 仓库中搜索和查找文件时遵守 `.gitignore`（通过只读的 `git ls-files`，并关闭 fsmonitor 等可能执行外部命令的配置），不是 Git 仓库或目录本身被忽略时直接遍历目录。工具始终跳过 `.git`、虚拟环境、`node_modules`、构建目录、符号链接、`.env`、`.ssh`/`.aws` 等凭据目录和常见密钥文件（名称比较不区分大小写），搜索时还跳过依赖锁文件（如 `package-lock.json`）和压缩产物（`.min.js` 等）；单次搜索最多扫描 20,000 个文件、10 秒，单文件最大 1 MiB。每个问题最多调用 60 轮工具：剩余 3 轮时提醒模型收尾；用完后要求模型根据已获取的信息直接作答，回答下方提示“已达到工具调用上限”，点击“继续分析”（或回复“继续”）可接着分析。与模型服务的连接中断、超时或服务端 5xx 时，自动重发当次请求一次（已执行的工具结果保留，不重复执行），界面显示重试提示。搜索是文本匹配，不等同于语法级调用链分析。文件名排除规则不能识别所有敏感内容：**被读取或搜索到的代码片段会发送给配置的模型服务**，请只选择允许发送的项目。
 
 ## 后续步骤
 

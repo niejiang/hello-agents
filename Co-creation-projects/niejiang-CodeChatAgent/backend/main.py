@@ -4,16 +4,13 @@ import argparse
 import sys
 from pathlib import Path
 
-from dotenv import load_dotenv
-
 # 优先从当前项目的 backend 导入，避免 IDE 中其他项目的 app 同名包干扰。
 BACKEND_DIR = Path(__file__).resolve().parent
 if str(BACKEND_DIR) not in sys.path or sys.path[0] != str(BACKEND_DIR):
     sys.path.insert(0, str(BACKEND_DIR))
 
+from app.config import load_env
 from app.services.chat_service import CodeChatSession, open_project
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def format_arguments(arguments: object) -> str:
@@ -27,8 +24,11 @@ def format_arguments(arguments: object) -> str:
 
 def main() -> int:
     """加载配置并启动单轮问答或交互式多轮对话。"""
-    load_dotenv(PROJECT_ROOT / ".env")
     parser = argparse.ArgumentParser(description="与助手对话；需要分析项目时，在对话中给出项目路径即可")
+    parser.add_argument(
+        "--env-file",
+        help="模型配置文件，相对路径按项目根目录解析，如 .env.deepseek；默认读取环境变量 CODECHAT_ENV_FILE 指定的文件或 .env",
+    )
     parser.add_argument(
         "--project",
         type=Path,
@@ -38,6 +38,7 @@ def main() -> int:
     )
     parser.add_argument("question", nargs="*", help="可选问题；不提供则进入多轮对话")
     args = parser.parse_args()
+    load_env(args.env_file)
     try:
         projects = [open_project(path) for path in args.project]
         session = CodeChatSession(projects)
@@ -79,6 +80,9 @@ def main() -> int:
                     stack = "·".join(event["stack"]) or "未识别技术栈"
                     print(f"  · 已打开项目 {event['name']}（{stack}，{event['path']}）", flush=True)
                     at_line_start = True
+                elif kind == "retrying":
+                    print(f"\n  （{event['reason']}）", flush=True)
+                    at_line_start = True
                 elif kind == "context_trimmed":
                     print(f"\n  （{event['reason']}）", flush=True)
                     at_line_start = True
@@ -88,6 +92,8 @@ def main() -> int:
                 elif kind == "done":
                     context = event["context"]
                     usage = event["usage"]
+                    if event.get("limited"):
+                        print(f"\n\n  （已达到工具调用上限 {event['limited']} 轮，分析可能不完整；输入“继续”可接着分析）", end="")
                     print(
                         f"\n\n  （输入 {usage['last_prompt_tokens'] or '—'} token，"
                         f"预算占用 {context['budget_percent']}%，请求 {usage['requests']} 次）\n",

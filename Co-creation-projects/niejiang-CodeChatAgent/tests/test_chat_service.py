@@ -42,7 +42,6 @@ class ChatServiceTests(unittest.TestCase):
         self.create_agent.assert_called_once_with(session.projects, session.permissions)
         self.agent.run_stream.assert_called_once_with(
             '问题', should_stop=ANY, max_tool_iterations=MAX_TOOL_ITERATIONS, max_tokens=MAX_ANSWER_TOKENS,
-            extra_body={'enable_thinking': False},
         )
         self.assertEqual(MAX_ANSWER_TOKENS, 4096)
 

@@ -26,7 +26,7 @@ type PermissionPart = { kind: 'permission'; id: string; path: string; deadline: 
 type UserMessage = { role: 'user'; text: string }
 type AssistantMessage = {
   role: 'assistant'; parts: Part[]; state: 'streaming' | 'done' | 'stopped' | 'error'
-  answer?: string; error?: string; meta?: string
+  answer?: string; error?: string; meta?: string; limited?: number
 }
 type Message = UserMessage | AssistantMessage
 // send 为 false 时只填入输入框，由用户补全（如项目路径）后再发送。
@@ -331,6 +331,7 @@ function applyEvent(reply: AssistantMessage, event: ChatEvent, live = true) {
       break
     }
     case 'context_trimmed':
+    case 'retrying':
       reply.parts.push({ kind: 'notice', text: event.reason })
       break
     case 'project_opened': {
@@ -344,7 +345,7 @@ function applyEvent(reply: AssistantMessage, event: ChatEvent, live = true) {
       break
     }
     case 'done':
-      reply.state = 'done'; reply.answer = event.answer; reply.meta = formatMeta(event)
+      reply.state = 'done'; reply.answer = event.answer; reply.meta = formatMeta(event); reply.limited = event.limited
       break
     case 'stopped':
       reply.state = 'stopped'
@@ -695,6 +696,10 @@ onBeforeUnmount(() => { window.clearInterval(ticker); window.clearTimeout(stopTi
                 </div>
                 <p v-if="message.state === 'stopped'" class="state-note">已停止回答，本次内容不会计入对话历史。</p>
                 <p v-if="message.state === 'error'" class="state-note error-note">{{ message.error }}</p>
+                <p v-if="message.limited" class="state-note limit-note">
+                  已达到工具调用上限（{{ message.limited }} 轮），分析可能不完整。
+                  <button v-if="index === messages.length - 1 && !busy" type="button" class="limit-continue" @click="send('继续')">继续分析</button>
+                </p>
                 <div v-if="message.state !== 'streaming'" class="msg-actions">
                   <button v-if="message.parts.some(p => p.kind === 'text')" class="ghost-button small" @click="copyMessage($event, message)">复制</button>
                   <span v-if="message.meta" class="msg-meta">{{ message.meta }}</span>

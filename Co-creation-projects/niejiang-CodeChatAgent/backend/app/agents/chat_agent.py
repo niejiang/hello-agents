@@ -3,11 +3,14 @@
 import json
 import logging
 import os
+import re
+import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import httpx
 import openai
 from hello_agents import HelloAgentsLLM
 from hello_agents.agents import FunctionCallAgent
@@ -37,6 +40,28 @@ MIN_CLEARABLE_CHARS = 500
 # 超长兜底时，每条工具结果保留的字符数。
 OVERFLOW_TOOL_RESULT_CHARS = 2000
 MAX_TRACE_ITEMS = 10
+# 连接中断、超时或服务端 5xx 等临时错误时，重新发送同一请求的次数与间隔；已执行的工具结果保留，不重复执行。
+MAX_STREAM_RETRIES = 1
+RETRY_DELAY_SECONDS = 2.0
+# 流式读取中途断开时 httpx 的错误不会被 openai 包装，需一并识别。
+RETRYABLE_ERRORS = (openai.APIConnectionError, openai.InternalServerError, httpx.TransportError)
+# 剩余工具轮数不超过该值时，在工具结果后提醒模型收尾。
+WRAP_UP_ROUNDS = 3
+# 轮数用完、强制作答前追加的说明；只用于本次请求，不写入历史。
+FORCED_ANSWER_NOTE = (
+    "[系统提示：本轮工具调用次数已用完，不能再调用任何工具。请根据目前已获取的信息直接给出尽可能完整的回答，"
+    "并说明哪些部分尚未查看；不要输出工具调用、函数名或 JSON。]"
+)
+# 强制作答仍没有有效内容（如把工具调用写成文字）时使用的回答。
+LIMIT_FALLBACK_ANSWER = "（工具调用次数已用完，尚未得出结论。）"
+# 模型把工具调用写成文字的常见形式：[{"function": ...}]、{"name": ...}、<tool_call>。
+PSEUDO_TOOL_CALL = re.compile(r'^\s*(?:\[\s*)?\{\s*"(?:function|name|tool|tool_name)"\s*:|^\s*<\|?tool_call', re.S)
+# 强制作答时，以这些字符开头的输出先缓存，确认不是伪工具调用后再显示。
+SUSPICIOUS_START = ("[", "{", "<")
+
+
+def looks_like_tool_call(text: str) -> bool:
+    return bool(PSEUDO_TOOL_CALL.match(text))
 
 Event = dict[str, Any]
 
@@ -178,12 +203,15 @@ class CodeChatAgent(FunctionCallAgent):
     """自建的流式工具调用循环；复用框架的模型配置、工具注册表和参数处理。"""
 
     def __init__(self, *args: Any, context_budget: ContextBudget, projects: ProjectSet,
-                 permissions: PermissionBroker | None = None, **kwargs: Any) -> None:
+                 permissions: PermissionBroker | None = None, extra_body: dict[str, Any] | None = None,
+                 **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.context = context_budget
         self.projects = projects
         # 未提供时（如单元测试），模型推断出的路径直接拒绝。
         self.permissions = permissions
+        # 模型服务的专有参数（如关闭思考模式），来自配置 LLM_EXTRA_BODY。
+        self.extra_body = dict(extra_body or {})
         self.turns: list[Turn] = []
 
     def _build_tool_schemas(self) -> list[dict[str, Any]]:
@@ -259,13 +287,36 @@ class CodeChatAgent(FunctionCallAgent):
             request["tool_choice"] = "none" if force_answer else "auto"
         return request
 
+    def _round_with_retry(self, request: dict[str, Any], usage: dict[str, int],
+                          should_stop: Callable[[], bool], force_answer: bool):
+        """执行一次请求；遇到连接中断等临时错误时推送 retrying 事件并重发，用户已停止时不再重试。"""
+        for attempt in range(MAX_STREAM_RETRIES + 1):
+            try:
+                return (yield from self._stream_round(request, usage, should_stop, hold_suspicious=force_answer))
+            except RETRYABLE_ERRORS as exc:
+                # 用户已停止：按停止处理，不报错也不重试。
+                if should_stop():
+                    return None
+                if attempt == MAX_STREAM_RETRIES:
+                    raise
+                logger.warning("模型请求中断，%.0f 秒后重试：%r", RETRY_DELAY_SECONDS, exc)
+                yield {"type": "retrying", "attempt": attempt + 1,
+                       "reason": "与模型服务的连接中断，正在重试本次请求（已获取的工具结果保留）"}
+                time.sleep(RETRY_DELAY_SECONDS)
+        return None
+
     def _stream_round(self, request: dict[str, Any], usage: dict[str, int],
-                      should_stop: Callable[[], bool]):
-        """执行一次流式请求：推送文字片段，按 index 拼接工具调用；被停止时返回 None。"""
+                      should_stop: Callable[[], bool], hold_suspicious: bool = False):
+        """执行一次流式请求：推送文字片段，按 index 拼接工具调用；被停止时返回 None。
+
+        hold_suspicious 为 True 时，若输出以 [、{、< 开头则不推送，作为第三项返回，由调用方判断是否为伪工具调用。
+        """
         payload = {"messages": request["messages"], "tools": request.get("tools")}
         usage["last_estimated_prompt_tokens"] = self.context.estimate(payload)
         stream = self.llm._client.chat.completions.create(**request)
         parts: list[str] = []
+        held: list[str] = []
+        holding = hold_suspicious
         calls: dict[int, dict[str, str]] = {}
         prompt_tokens = 0
         try:
@@ -282,7 +333,16 @@ class CodeChatAgent(FunctionCallAgent):
                     delta = choice.delta
                     if delta.content:
                         parts.append(delta.content)
-                        yield {"type": "text_delta", "text": delta.content}
+                        if holding:
+                            held.append(delta.content)
+                            start = "".join(held).lstrip()
+                            if not start or start.startswith(SUSPICIOUS_START):
+                                continue
+                            holding = False
+                            yield {"type": "text_delta", "text": "".join(held)}
+                            held.clear()
+                        else:
+                            yield {"type": "text_delta", "text": delta.content}
                     for tool_call in delta.tool_calls or []:
                         entry = calls.setdefault(tool_call.index, {"id": "", "name": "", "arguments": ""})
                         if tool_call.id:
@@ -307,14 +367,16 @@ class CodeChatAgent(FunctionCallAgent):
             call = calls[index]
             call["id"] = call["id"] or f"call_{index}"
             ordered.append(call)
-        return "".join(parts), ordered
+        return "".join(parts), ordered, "".join(held)
 
     def run_stream(self, question: str, *, max_tool_iterations: int = 3, max_tokens: int | None = None,
                    extra_body: dict[str, Any] | None = None,
                    should_stop: Callable[[], bool] | None = None) -> Iterator[Event]:
         """回答一个问题并逐步产出事件：text_delta、tool_start、permission_request、permission_resolved、tool_end、
-        project_opened、context_trimmed、stopped、done。"""
+        project_opened、context_trimmed、retrying、stopped、done。"""
         should_stop = should_stop or (lambda: False)
+        # 未单独指定时使用配置中的模型专有参数。
+        extra_body = self.extra_body if extra_body is None else extra_body
         self.projects.begin_turn(question)
         messages = self._build_messages(question)
         tools = self._build_tool_schemas()
@@ -324,6 +386,7 @@ class CodeChatAgent(FunctionCallAgent):
         records: list[ToolRecord] = []
         cleared_total = 0
         answer = ""
+        limited = False
 
         for iteration in range(max_tool_iterations + 1):
             force_answer = iteration == max_tool_iterations
@@ -344,9 +407,11 @@ class CodeChatAgent(FunctionCallAgent):
                 records = []
                 self.turns.clear()
                 yield {"type": "context_trimmed", "scope": "history", "reason": "输入接近模型上限，已移除历史并缩短工具结果"}
-            request = self._request(messages, tools, force_answer, max_tokens, extra_body)
+            # 轮数用完：明确告诉模型不能再调用工具，避免它把工具调用写成文字。
+            sent = messages + [{"role": "user", "content": FORCED_ANSWER_NOTE}] if force_answer and iteration else messages
+            request = self._request(sent, tools, force_answer, max_tokens, extra_body)
             try:
-                result = yield from self._stream_round(request, usage, should_stop)
+                result = yield from self._round_with_retry(request, usage, should_stop, force_answer)
             except openai.BadRequestError as exc:
                 if not is_context_overflow(exc):
                     raise
@@ -355,12 +420,25 @@ class CodeChatAgent(FunctionCallAgent):
                 records = []
                 self.turns.clear()
                 yield {"type": "context_trimmed", "scope": "history", "reason": "超出模型输入上限，已移除历史并缩短工具结果后重试"}
-                request = self._request(messages, tools, force_answer, max_tokens, extra_body)
-                result = yield from self._stream_round(request, usage, should_stop)
+                sent = messages + [{"role": "user", "content": FORCED_ANSWER_NOTE}] if force_answer and iteration else messages
+                request = self._request(sent, tools, force_answer, max_tokens, extra_body)
+                result = yield from self._round_with_retry(request, usage, should_stop, force_answer)
             if result is None:
                 yield {"type": "stopped"}
                 return
-            content, calls = result
+            content, calls, held = result
+            if force_answer and iteration:
+                limited = True
+                if held and looks_like_tool_call(held):
+                    logger.warning("轮数用完后模型仍输出工具调用文字，已丢弃：%s", held[:200])
+                    content = content[: len(content) - len(held)]
+                elif held:
+                    yield {"type": "text_delta", "text": held}
+                if not content.strip():
+                    content = LIMIT_FALLBACK_ANSWER
+                    yield {"type": "text_delta", "text": content}
+            elif held:
+                yield {"type": "text_delta", "text": held}
             if not calls or force_answer:
                 answer = content
                 break
@@ -395,6 +473,11 @@ class CodeChatAgent(FunctionCallAgent):
                     trace.append(label)
                     records.append(ToolRecord(len(messages) - 1, label))
             cleared_total += dedupe_tool_results(messages, records)
+            # 剩余轮数不多时提醒模型收尾，让它主动总结，而不是在强制作答时才停下。
+            remaining = max_tool_iterations - iteration - 1
+            if 0 < remaining <= WRAP_UP_ROUNDS and messages[-1]["role"] == "tool":
+                messages[-1]["content"] += (f"\n\n[系统提示：本轮工具调用还剩 {remaining} 次，请尽快收尾："
+                                            "只查看最关键的内容，然后给出回答。]")
 
         trimmed = 0
         if answer.strip():
@@ -416,7 +499,10 @@ class CodeChatAgent(FunctionCallAgent):
             "tokens_per_char": round(self.context.tokens_per_char, 4),
         }
         logger.info("本轮用量 %s，上下文 %s", usage, context)
-        yield {"type": "done", "answer": answer, "usage": usage, "context": context}
+        done: Event = {"type": "done", "answer": answer, "usage": usage, "context": context}
+        if limited:
+            done["limited"] = max_tool_iterations
+        yield done
 
     def _confirm_open(self, call_id: str, target: str, should_stop: Callable[[], bool]):
         """模型推断出的路径需要用户确认：推送 permission_request 并等待决定。
@@ -464,8 +550,23 @@ def read_positive_int(name: str) -> int:
     except ValueError:
         number = 0
     if number <= 0:
-        raise ValueError(f"配置 {name} 缺失或无效，应为正整数。请按百炼模型列表在项目根目录的 .env 中填写。")
+        raise ValueError(f"配置 {name} 缺失或无效，应为正整数。请按模型服务的文档在配置文件（默认项目根目录的 .env）中填写。")
     return number
+
+
+def read_extra_body() -> dict[str, Any]:
+    """读取 LLM_EXTRA_BODY：随请求发送的模型服务专有参数，JSON 对象，不需要时填 {}。"""
+    value = os.getenv("LLM_EXTRA_BODY", "").strip()
+    try:
+        parsed = json.loads(value)
+    except ValueError:
+        parsed = None
+    if not isinstance(parsed, dict):
+        raise ValueError(
+            "配置 LLM_EXTRA_BODY 缺失或无效，应为 JSON 对象，例如百炼填 {\"enable_thinking\": false}、"
+            "DeepSeek 填 {\"thinking\": {\"type\": \"disabled\"}}，不需要时填 {}。"
+        )
+    return parsed
 
 
 SYSTEM_PROMPT = """你是一个友好的通用助手，擅长分析代码，请用中文回答。
@@ -484,6 +585,8 @@ open_project 优先使用用户消息中写出的路径或已授权项目。其�
 2. 用 search_code 定位定义和调用处。关键词常见时，用 path 限定目录、glob 限定文件类型（如 *.java），或用 regex 精确匹配（如 \\bcreateOrder\\(、class\\s+OrderService）；需要先了解分布时设 output 为 files 或 count；需要看上下文时设 context。
 3. 搜索结果出现“结果已截断”时，说明还有未显示的匹配，应缩小范围后再搜，不要只依据部分结果下结论。
 4. 用 read_file 读取相关代码，一次可读较大范围（最多 500 行）；结果会给出文件总行数。
+5. 概览类问题（如项目架构、业务说明、多个项目的对比）先看 README、目录结构、构建文件和入口代码，按项目、按模块概括，不要逐个页面深挖；细节留给用户追问。
+工具调用次数有限，收到“还剩 N 次”的提示后应尽快收尾。
 打开多个项目时，list_files、read_file、find_files 必须用 project 参数指定项目；search_code 省略 project 会搜索全部已打开项目。相互独立的查询可以在同一轮中同时调用多个工具，例如比较两个项目时对两边同时搜索。
 
 【引用】回答时引用真实的相对路径和行号，不要编造证据。只打开一个项目时格式如 backend/main.py:19；打开多个项目时在前面加项目简称，如 my-agent:src/tools.ts:42。
@@ -500,11 +603,12 @@ def create_chat_agent(projects: ProjectSet | None = None, permissions: Permissio
     required = ("LLM_MODEL_ID", "LLM_API_KEY", "LLM_BASE_URL")
     missing = [name for name in required if not os.getenv(name, "").strip()]
     if missing:
-        raise ValueError(f"缺少模型配置：{', '.join(missing)}。请检查项目根目录的 .env 文件。")
+        raise ValueError(f"缺少模型配置：{', '.join(missing)}。请检查配置文件（默认项目根目录的 .env）。")
     max_input = read_positive_int("LLM_MAX_INPUT_TOKENS")
     budget = read_positive_int("LLM_CONTEXT_BUDGET")
     if budget > max_input:
         raise ValueError("LLM_CONTEXT_BUDGET 不能大于 LLM_MAX_INPUT_TOKENS。")
+    extra_body = read_extra_body()
 
     llm = HelloAgentsLLM(
         model=os.environ["LLM_MODEL_ID"],
@@ -522,4 +626,5 @@ def create_chat_agent(projects: ProjectSet | None = None, permissions: Permissio
         context_budget=ContextBudget(budget, max_input),
         projects=projects,
         permissions=permissions,
+        extra_body=extra_body,
     )
